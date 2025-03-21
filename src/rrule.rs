@@ -14,6 +14,7 @@ use winnow::{ModalResult, Parser};
 enum RulePart {
     Freq(Frequency),
     Count(usize),
+    Interval(usize),
     WkSt(Weekday),
 }
 
@@ -54,7 +55,7 @@ fn frequency(input: &mut &[u8]) -> ModalResult<Frequency> {
     .parse_next(input)
 }
 
-const COUNT_LABEL: StrContext = StrContext::Label("occurences");
+const COUNT_LABEL: StrContext = StrContext::Label("occurrences");
 const COUNT_EXPECTED: StrContext = StrContext::Expected(StrContextValue::Description(
     "Number of occurrences of the repeating event",
 ));
@@ -67,9 +68,19 @@ fn count(input: &mut &[u8]) -> ModalResult<RulePart> {
         .parse_next(input)?;
     Ok(RulePart::Count(n))
 }
-fn wk_st(input: &mut &[u8]) -> ModalResult<RulePart> {
-    Caseless("WKST=").parse_next(input)?;
-    Ok(RulePart::WkSt(weekday(input)?))
+
+const INTERVAL_LABEL: StrContext = StrContext::Label("interval");
+const INTERVAL_EXPECTED: StrContext = StrContext::Expected(StrContextValue::Description(
+    "How often the repeating event occurs",
+));
+fn interval(input: &mut &[u8]) -> ModalResult<RulePart> {
+    Caseless("INTERVAL=").parse_next(input)?;
+    let n = digit1
+        .parse_to()
+        .context(INTERVAL_LABEL)
+        .context(INTERVAL_EXPECTED)
+        .parse_next(input)?;
+    Ok(RulePart::Interval(n))
 }
 
 const WEEKDAY_LABEL: StrContext = StrContext::Label("weekday");
@@ -91,6 +102,12 @@ fn weekday(input: &mut &[u8]) -> ModalResult<Weekday> {
     .context(WEEKDAY_EXPECTED)
     .parse_next(input)
 }
+
+fn wk_st(input: &mut &[u8]) -> ModalResult<RulePart> {
+    Caseless("WKST=").parse_next(input)?;
+    Ok(RulePart::WkSt(weekday(input)?))
+}
+
 mod test {
     #![allow(clippy::pedantic)]
     use super::*;
@@ -144,6 +161,23 @@ mod test {
             vec![COUNT_LABEL, COUNT_EXPECTED],
         );
     }
+
+    #[test]
+    fn test_interval() {
+        assert_eq!(
+            interval.parse_peek(B("interval=42,")),
+            Ok((B(","), RulePart::Interval(42)))
+        );
+    }
+
+    #[test]
+    fn interval_error() {
+        check_context(
+            interval.parse(B("interval=-1")).unwrap_err(),
+            vec![INTERVAL_LABEL, INTERVAL_EXPECTED],
+        );
+    }
+
     #[test]
     fn test_weekday() {
         use Weekday::*;
