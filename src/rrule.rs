@@ -1,4 +1,5 @@
 use std::f32::consts::FRAC_1_PI;
+use std::str::FromStr;
 
 use crate::Weekday;
 use bstr::{B, BStr, ByteSlice};
@@ -167,16 +168,16 @@ fn test_interval() {
 // Clamped — for a list of seconds, minutes, etc.
 // FIXME — say exactly which rule parts it helps implement
 #[derive(Debug, Clone)]
-struct Clamped {
-    range: std::ops::RangeInclusive<u8>,
+struct Clamped<N: FromStr + PartialOrd> {
+    range: std::ops::RangeInclusive<N>,
     label: StrContext,
     expected: StrContext,
 }
-impl Parser<&[u8], u8, ErrMode<ContextError>> for Clamped {
-    fn parse_next(&mut self, input: &mut &[u8]) -> ModalResult<u8> {
+impl<N: FromStr + PartialOrd> Parser<&[u8], N, ErrMode<ContextError>> for Clamped<N> {
+    fn parse_next(&mut self, input: &mut &[u8]) -> ModalResult<N> {
         digit1
             .parse_to()
-            .verify(|n: &u8| self.range.contains(n))
+            .verify(|n: &N| self.range.contains(n))
             .context(self.label.clone())
             .context(self.expected.clone())
             .parse_next(input)
@@ -189,7 +190,7 @@ const BY_SECOND_LABEL: StrContext = label("a list of seconds");
 const BY_SECOND_EXPECTED: StrContext =
     expected("numbers between 0 and 60 (60 is for leap seconds only)");
 fn by_second(input: &mut &[u8]) -> ModalResult<RulePart> {
-    let num = Clamped {
+    let num = Clamped::<u8> {
         range: 0..=60,
         label: BY_SECOND_LABEL,
         expected: BY_SECOND_EXPECTED,
@@ -215,7 +216,7 @@ fn test_by_second() {
 const BY_HOUR_LABEL: StrContext = label("a list of hours");
 const BY_HOUR_EXPECTED: StrContext = expected("numbers between 0 and 23");
 fn by_hour(input: &mut &[u8]) -> ModalResult<RulePart> {
-    let num = Clamped {
+    let num = Clamped::<u8> {
         range: 0..=23,
         label: BY_HOUR_LABEL,
         expected: BY_HOUR_EXPECTED,
@@ -241,7 +242,7 @@ fn test_by_hour() {
 const BY_MINUTE_LABEL: StrContext = label("a list of minutes");
 const BY_MINUTE_EXPECTED: StrContext = expected("numbers between 0 and 59");
 fn by_minute(input: &mut &[u8]) -> ModalResult<RulePart> {
-    let num = Clamped {
+    let num = Clamped::<u8> {
         range: 0..=59,
         label: BY_MINUTE_LABEL,
         expected: BY_MINUTE_EXPECTED,
