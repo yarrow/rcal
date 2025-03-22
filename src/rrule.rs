@@ -4,13 +4,15 @@ use crate::Weekday;
 use bstr::{B, BStr};
 
 use winnow::ascii::{Caseless, digit1};
-use winnow::combinator::{alt, cut_err};
-use winnow::error::{ContextError, ErrMode, Needed, StrContext, StrContextValue};
+use winnow::combinator::{alt, cut_err, separated};
+use winnow::error::{
+    ContextError, EmptyError, ErrMode, Needed, ParserError, StrContext, StrContextValue,
+};
 use winnow::prelude::*;
 use winnow::token::literal;
-use winnow::{ModalResult, Parser};
+use winnow::{ModalResult, Parser, Result};
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 enum RulePart {
     Freq(Frequency),
     Count(usize),
@@ -18,13 +20,31 @@ enum RulePart {
     WkSt(Weekday),
 }
 
-fn freq(input: &mut &[u8]) -> ModalResult<RulePart> {
-    Caseless("FREQ=").parse_next(input)?;
-    Ok(RulePart::Freq(frequency(input)?))
+#[test]
+fn check_rule_part_errors() {
+    check_error(freq, "FREQ=weird", [FREQ_LABEL, FREQ_EXPECTED]);
+    check_error(count, "COUNT=nonnumeric", [COUNT_LABEL, COUNT_EXPECTED]);
+    check_error(interval, "interval=x", [INTERVAL_LABEL, INTERVAL_EXPECTED]);
+    check_error(wk_st, "WkSt=xx", [WEEKDAY_LABEL, WEEKDAY_EXPECTED]);
+}
+#[cfg(test)]
+fn check_error<const N: usize>(
+    mut parser: impl FnMut(&mut &[u8]) -> ModalResult<RulePart>,
+    input: &str,
+    context: [StrContext; N],
+) {
+    let equal_sign = input.find('=').expect("Can't find an equal sign (=)");
+    let input = B(input);
+    let err = parser.parse(input).unwrap_err();
+    assert!(
+        err.offset() > equal_sign,
+        "Error should happen after the equals sign"
+    );
+    assert_eq!(B(err.input()), input);
+    assert_eq!(err.inner().context().cloned().collect::<Vec<_>>(), context);
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
-
 enum Frequency {
     Secondly,
     Minutely,
@@ -35,10 +55,21 @@ enum Frequency {
     Yearly,
 }
 
-const FREQUENCY_LABEL: StrContext = StrContext::Label("frequency");
-const FREQUENCY_EXPECTED: StrContext = StrContext::Expected(StrContextValue::Description(
-    "Frequency: DAILY, WEEKLY, MONTHLY, etc",
-));
+const fn label(lbl: &'static str) -> StrContext {
+    StrContext::Label(lbl)
+}
+const fn expected(description: &'static str) -> StrContext {
+    StrContext::Expected(StrContextValue::Description(description))
+}
+// Parse Freq and Frequency
+//
+fn freq(input: &mut &[u8]) -> ModalResult<RulePart> {
+    Caseless("FREQ=").parse_next(input)?;
+    Ok(RulePart::Freq(frequency(input)?))
+}
+
+const FREQ_LABEL: StrContext = label("frequency");
+const FREQ_EXPECTED: StrContext = expected("Frequency: DAILY, WEEKLY, MONTHLY, etc");
 fn frequency(input: &mut &[u8]) -> ModalResult<Frequency> {
     use Frequency::*;
     cut_err(alt((
@@ -50,15 +81,15 @@ fn frequency(input: &mut &[u8]) -> ModalResult<Frequency> {
         Caseless(B("Monthly")).value(Monthly),
         Caseless(B("Yearly")).value(Yearly),
     )))
-    .context(FREQUENCY_LABEL)
-    .context(FREQUENCY_EXPECTED)
+    .context(FREQ_LABEL)
+    .context(FREQ_EXPECTED)
     .parse_next(input)
 }
 
-const COUNT_LABEL: StrContext = StrContext::Label("occurrences");
-const COUNT_EXPECTED: StrContext = StrContext::Expected(StrContextValue::Description(
-    "Number of occurrences of the repeating event",
-));
+// Parse Count
+//
+const COUNT_LABEL: StrContext = label("occurrences");
+const COUNT_EXPECTED: StrContext = expected("Number of occurrences of the repeating event");
 fn count(input: &mut &[u8]) -> ModalResult<RulePart> {
     Caseless("COUNT=").parse_next(input)?;
     let n = digit1
@@ -69,10 +100,11 @@ fn count(input: &mut &[u8]) -> ModalResult<RulePart> {
     Ok(RulePart::Count(n))
 }
 
-const INTERVAL_LABEL: StrContext = StrContext::Label("interval");
-const INTERVAL_EXPECTED: StrContext = StrContext::Expected(StrContextValue::Description(
-    "How often the repeating event occurs",
-));
+// Parse Interval
+//
+
+const INTERVAL_LABEL: StrContext = label("interval");
+const INTERVAL_EXPECTED: StrContext = expected("How often the repeating event occurs");
 fn interval(input: &mut &[u8]) -> ModalResult<RulePart> {
     Caseless("INTERVAL=").parse_next(input)?;
     let n = digit1
@@ -83,10 +115,10 @@ fn interval(input: &mut &[u8]) -> ModalResult<RulePart> {
     Ok(RulePart::Interval(n))
 }
 
-const WEEKDAY_LABEL: StrContext = StrContext::Label("weekday");
-const WEEKDAY_EXPECTED: StrContext = StrContext::Expected(StrContextValue::Description(
-    "Weekday abbreviation: SU, MO, TU, WE, TH, FR, SA",
-));
+// Parse WkSt and Weekday
+//
+const WEEKDAY_LABEL: StrContext = label("weekday");
+const WEEKDAY_EXPECTED: StrContext = expected("Weekday abbreviation: SU, MO, TU, WE, TH, FR, SA");
 fn weekday(input: &mut &[u8]) -> ModalResult<Weekday> {
     use Weekday::*;
     cut_err(alt((
@@ -108,6 +140,8 @@ fn wk_st(input: &mut &[u8]) -> ModalResult<RulePart> {
     Ok(RulePart::WkSt(weekday(input)?))
 }
 
+// Tests //////////////////////////////////////////////////////////
+#[cfg(test)]
 mod test {
     #![allow(clippy::pedantic)]
     use super::*;
@@ -134,19 +168,6 @@ mod test {
     }
 
     #[test]
-    fn freq_error() {
-        let input = B("FREQ=Zekondly");
-        let err = freq.parse(input).unwrap_err();
-        assert_eq!(err.offset(), 5);
-        assert_eq!(B(err.input()), input);
-        check_context(err, vec![FREQUENCY_LABEL, FREQUENCY_EXPECTED])
-    }
-
-    fn check_context(err: ParseError<&[u8], ContextError>, contexts: Vec<StrContext>) {
-        assert_eq!(err.inner().context().cloned().collect::<Vec<_>>(), contexts);
-    }
-
-    #[test]
     fn test_count() {
         assert_eq!(
             count.parse_peek(B("count=42,")),
@@ -155,26 +176,10 @@ mod test {
     }
 
     #[test]
-    fn count_error() {
-        check_context(
-            count.parse(B("count=-1")).unwrap_err(),
-            vec![COUNT_LABEL, COUNT_EXPECTED],
-        );
-    }
-
-    #[test]
     fn test_interval() {
         assert_eq!(
             interval.parse_peek(B("interval=42,")),
             Ok((B(","), RulePart::Interval(42)))
-        );
-    }
-
-    #[test]
-    fn interval_error() {
-        check_context(
-            interval.parse(B("interval=-1")).unwrap_err(),
-            vec![INTERVAL_LABEL, INTERVAL_EXPECTED],
         );
     }
 
@@ -200,13 +205,5 @@ mod test {
             wk_st.parse_peek(B("WkST=SU,")),
             Ok((B(","), RulePart::WkSt(Weekday::Sunday)))
         );
-    }
-
-    #[test]
-    fn wk_st_error() {
-        check_context(
-            wk_st.parse(B("wkst=XX")).unwrap_err(),
-            vec![WEEKDAY_LABEL, WEEKDAY_EXPECTED],
-        )
     }
 }
