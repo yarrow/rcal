@@ -21,6 +21,7 @@ enum RulePart {
     BySecond(Vec<u8>),
     ByMinute(Vec<u8>),
     ByHour(Vec<u8>),
+    ByMonthDay(Vec<i8>),
     WkSt(Weekday),
 }
 
@@ -213,32 +214,6 @@ fn test_by_second() {
 
 // Parse ByMinute
 //
-const BY_HOUR_LABEL: StrContext = label("a list of hours");
-const BY_HOUR_EXPECTED: StrContext = expected("numbers between 0 and 23");
-fn by_hour(input: &mut &[u8]) -> ModalResult<RulePart> {
-    let num = Clamped::<u8> {
-        range: 0..=23,
-        label: BY_HOUR_LABEL,
-        expected: BY_HOUR_EXPECTED,
-    };
-    Caseless("BYHOUR=").parse_next(input)?;
-    let hour_list = separated(1.., cut_err(num), b',').parse_next(input)?;
-    Ok(RulePart::ByHour(hour_list))
-}
-#[test]
-fn test_by_hour() {
-    assert_eq!(
-        by_hour.parse_peek(B("byHOUR=12;")),
-        Ok((B(";"), RulePart::ByHour(vec![12u8]))),
-    );
-    assert_eq!(
-        by_hour.parse_peek(B("byHour=0,1,2,3,23;")),
-        Ok((B(";"), RulePart::ByHour(vec![0u8, 1u8, 2u8, 3u8, 23u8]))),
-    );
-}
-
-// Parse ByMinute
-//
 const BY_MINUTE_LABEL: StrContext = label("a list of minutes");
 const BY_MINUTE_EXPECTED: StrContext = expected("numbers between 0 and 59");
 fn by_minute(input: &mut &[u8]) -> ModalResult<RulePart> {
@@ -260,6 +235,32 @@ fn test_by_minute() {
     assert_eq!(
         by_minute.parse_peek(B("byMinute=0,1,2,3,59;")),
         Ok((B(";"), RulePart::ByMinute(vec![0u8, 1u8, 2u8, 3u8, 59u8]))),
+    );
+}
+
+// Parse ByHour
+//
+const BY_HOUR_LABEL: StrContext = label("a list of hours");
+const BY_HOUR_EXPECTED: StrContext = expected("numbers between 0 and 23");
+fn by_hour(input: &mut &[u8]) -> ModalResult<RulePart> {
+    let num = Clamped::<u8> {
+        range: 0..=23,
+        label: BY_HOUR_LABEL,
+        expected: BY_HOUR_EXPECTED,
+    };
+    Caseless("BYHOUR=").parse_next(input)?;
+    let hour_list = separated(1.., cut_err(num), b',').parse_next(input)?;
+    Ok(RulePart::ByHour(hour_list))
+}
+#[test]
+fn test_by_hour() {
+    assert_eq!(
+        by_hour.parse_peek(B("byHOUR=12;")),
+        Ok((B(";"), RulePart::ByHour(vec![12u8]))),
+    );
+    assert_eq!(
+        by_hour.parse_peek(B("byHour=0,1,2,3,23;")),
+        Ok((B(";"), RulePart::ByHour(vec![0u8, 1u8, 2u8, 3u8, 23u8]))),
     );
 }
 
