@@ -1,11 +1,10 @@
-use std::f32::consts::FRAC_1_PI;
 use std::str::FromStr;
 
 use crate::Weekday;
 use bstr::{B, BStr, ByteSlice};
 
-use winnow::ascii::{Caseless, digit1};
-use winnow::combinator::{alt, cut_err, separated};
+use winnow::ascii::{Caseless, Int, Uint, dec_int, dec_uint};
+use winnow::combinator::{alt, cut_err, opt, separated};
 use winnow::error::{
     ContextError, EmptyError, ErrMode, Needed, ParserError, StrContext, StrContextValue,
 };
@@ -21,6 +20,7 @@ enum RulePart {
     BySecond(Vec<u8>),
     ByMinute(Vec<u8>),
     ByHour(Vec<u8>),
+    ByDay((i8, Weekday)),
     ByMonthDay(Vec<i8>),
     WkSt(Weekday),
 }
@@ -42,6 +42,14 @@ fn check_rule_part_errors() {
     for hours_list in ["xx", "2,XX", "2,3,4,24"] {
         let input = format!("ByHOUR={hours_list}");
         check_error(by_hour, &input, [BY_HOUR_LABEL, BY_HOUR_EXPECTED]);
+    }
+    for month_day_list in ["xx", "2,XX", "2,-32,4,24", "2,32,-4,24"] {
+        let input = format!("ByMONTHDAY={month_day_list}");
+        check_error(
+            by_month_day,
+            &input,
+            [BY_MONTH_DAY_LABEL, BY_MONTH_DAY_EXPECTED],
+        );
     }
 }
 #[cfg(test)]
@@ -130,8 +138,7 @@ const COUNT_LABEL: StrContext = label("occurrences");
 const COUNT_EXPECTED: StrContext = expected("Number of occurrences of the repeating event");
 fn count(input: &mut &[u8]) -> ModalResult<RulePart> {
     Caseless("COUNT=").parse_next(input)?;
-    let n = digit1
-        .parse_to()
+    let n = dec_uint
         .context(COUNT_LABEL)
         .context(COUNT_EXPECTED)
         .parse_next(input)?;
@@ -151,8 +158,7 @@ const INTERVAL_LABEL: StrContext = label("interval");
 const INTERVAL_EXPECTED: StrContext = expected("How often the repeating event occurs");
 fn interval(input: &mut &[u8]) -> ModalResult<RulePart> {
     Caseless("INTERVAL=").parse_next(input)?;
-    let n = digit1
-        .parse_to()
+    let n = dec_uint
         .context(INTERVAL_LABEL)
         .context(INTERVAL_EXPECTED)
         .parse_next(input)?;
@@ -166,19 +172,35 @@ fn test_interval() {
     );
 }
 
-// Clamped — for a list of seconds, minutes, etc.
-// FIXME — say exactly which rule parts it helps implement
+// Clamped — for a list of seconds, minutes, or hours
 #[derive(Debug, Clone)]
-struct Clamped<N: FromStr + PartialOrd> {
+struct Clamped {
+    range: std::ops::RangeInclusive<u8>,
+    label: StrContext,
+    expected: StrContext,
+}
+impl Parser<&[u8], u8, ErrMode<ContextError>> for Clamped {
+    fn parse_next(&mut self, input: &mut &[u8]) -> ModalResult<u8> {
+        dec_uint
+            .verify(|n: &u8| self.range.contains(n))
+            .context(self.label.clone())
+            .context(self.expected.clone())
+            .parse_next(input)
+    }
+}
+
+// ClampedSigned — for a list of weeks (in year), days in month, or days in year
+#[derive(Debug, Clone)]
+struct ClampedSigned<N: Int + PartialOrd + Default> {
     range: std::ops::RangeInclusive<N>,
     label: StrContext,
     expected: StrContext,
 }
-impl<N: FromStr + PartialOrd> Parser<&[u8], N, ErrMode<ContextError>> for Clamped<N> {
+impl<N: Int + PartialOrd + Default> Parser<&[u8], N, ErrMode<ContextError>> for ClampedSigned<N> {
     fn parse_next(&mut self, input: &mut &[u8]) -> ModalResult<N> {
-        digit1
-            .parse_to()
-            .verify(|n: &N| self.range.contains(n))
+        let zero = N::default();
+        dec_int
+            .verify(|n: &N| *n != zero && self.range.contains(n))
             .context(self.label.clone())
             .context(self.expected.clone())
             .parse_next(input)
@@ -191,7 +213,7 @@ const BY_SECOND_LABEL: StrContext = label("a list of seconds");
 const BY_SECOND_EXPECTED: StrContext =
     expected("numbers between 0 and 60 (60 is for leap seconds only)");
 fn by_second(input: &mut &[u8]) -> ModalResult<RulePart> {
-    let num = Clamped::<u8> {
+    let num = Clamped {
         range: 0..=60,
         label: BY_SECOND_LABEL,
         expected: BY_SECOND_EXPECTED,
@@ -217,7 +239,7 @@ fn test_by_second() {
 const BY_MINUTE_LABEL: StrContext = label("a list of minutes");
 const BY_MINUTE_EXPECTED: StrContext = expected("numbers between 0 and 59");
 fn by_minute(input: &mut &[u8]) -> ModalResult<RulePart> {
-    let num = Clamped::<u8> {
+    let num = Clamped {
         range: 0..=59,
         label: BY_MINUTE_LABEL,
         expected: BY_MINUTE_EXPECTED,
@@ -243,7 +265,7 @@ fn test_by_minute() {
 const BY_HOUR_LABEL: StrContext = label("a list of hours");
 const BY_HOUR_EXPECTED: StrContext = expected("numbers between 0 and 23");
 fn by_hour(input: &mut &[u8]) -> ModalResult<RulePart> {
-    let num = Clamped::<u8> {
+    let num = Clamped {
         range: 0..=23,
         label: BY_HOUR_LABEL,
         expected: BY_HOUR_EXPECTED,
@@ -261,6 +283,36 @@ fn test_by_hour() {
     assert_eq!(
         by_hour.parse_peek(B("byHour=0,1,2,3,23;")),
         Ok((B(";"), RulePart::ByHour(vec![0u8, 1u8, 2u8, 3u8, 23u8]))),
+    );
+}
+
+// Parse ByMonthDay
+//
+const BY_MONTH_DAY_LABEL: StrContext = label("a list of days");
+const BY_MONTH_DAY_EXPECTED: StrContext =
+    expected("nonzero numbers between -31 and 31 (-1 is the last day of the month)");
+fn by_month_day(input: &mut &[u8]) -> ModalResult<RulePart> {
+    let num = ClampedSigned::<i8> {
+        range: -31..=31,
+        label: BY_MONTH_DAY_LABEL,
+        expected: BY_MONTH_DAY_EXPECTED,
+    };
+    Caseless("BYMONTHDAY=").parse_next(input)?;
+    let month_day_list = separated(1.., cut_err(num), b',').parse_next(input)?;
+    Ok(RulePart::ByMonthDay(month_day_list))
+}
+#[test]
+fn test_by_month_day() {
+    assert_eq!(
+        by_month_day.parse_peek(B("byMONTHDAY=-12;")),
+        Ok((B(";"), RulePart::ByMonthDay(vec![-12i8]))),
+    );
+    assert_eq!(
+        by_month_day.parse_peek(B("byMonthDay=-31,+2,3,31,+31;")),
+        Ok((
+            B(";"),
+            RulePart::ByMonthDay(vec![-31i8, 2i8, 3i8, 31i8, 31i8])
+        )),
     );
 }
 
