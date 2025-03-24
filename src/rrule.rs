@@ -1,17 +1,29 @@
-use std::str::FromStr;
+use std::num::NonZeroI8;
 
 use crate::Weekday;
-use bstr::{B, BStr, ByteSlice};
+use bstr::B;
 
-use winnow::ascii::{Caseless, Int, Uint, dec_int, dec_uint};
+use winnow::ascii::{Caseless, Int, dec_int, dec_uint};
 use winnow::combinator::{alt, cut_err, opt, separated};
-use winnow::error::{
-    ContextError, EmptyError, ErrMode, Needed, ParserError, StrContext, StrContextValue,
-};
-use winnow::token::literal;
-use winnow::{ModalResult, Parser, Result};
-use winnow::{Str, prelude::*};
+use winnow::error::{ContextError, ErrMode, StrContext, StrContextValue};
+use winnow::{ModalResult, Parser};
 
+#[allow(clippy::missing_panics_doc)]
+pub fn parse(input: &mut &[u8]) {
+    alt((
+        freq,
+        count,
+        interval,
+        by_second,
+        by_minute,
+        by_hour,
+        by_month_day,
+        by_year_day,
+        wk_st,
+    ))
+    .parse_next(input)
+    .unwrap();
+}
 #[derive(Debug, PartialEq, Eq, Clone)]
 enum RulePart {
     Freq(Frequency),
@@ -20,9 +32,27 @@ enum RulePart {
     BySecond(Vec<u8>),
     ByMinute(Vec<u8>),
     ByHour(Vec<u8>),
-    ByDay((i8, Weekday)),
+    ByDay(Vec<SomeWeekdays>),
     ByMonthDay(Vec<i8>),
+    ByYearDay(Vec<i16>),
+    ByWeekNo(Vec<i8>),
+    ByMonth(Vec<u8>),
     WkSt(Weekday),
+}
+type SomeWeekdays = (Option<NonZeroI8>, Weekday);
+
+pub struct Rule {
+    freq: Frequency,
+    count: Option<usize>,
+    interval: Option<usize>,
+    by_second: Vec<u8>,
+    by_minute: Vec<u8>,
+    by_hour: Vec<u8>,
+    by_day: Vec<SomeWeekdays>,
+    by_month_day: Vec<i8>,
+    by_year_day: Vec<i16>,
+    by_week_no: Vec<i8>,
+    by_month: Vec<u8>,
 }
 
 #[test]
@@ -43,13 +73,28 @@ fn check_rule_part_errors() {
         let input = format!("ByHOUR={hours_list}");
         check_error(by_hour, &input, [BY_HOUR_LABEL, BY_HOUR_EXPECTED]);
     }
+    let day_context = [BY_DAY_LABEL, BY_DAY_EXPECTED];
+    check_error(by_day, "byday=-54X", day_context.clone());
+    check_error(by_day, "byday=xx", day_context.clone());
+
+    let month_context = [BY_MONTH_DAY_LABEL, BY_MONTH_DAY_EXPECTED];
     for month_day_list in ["xx", "2,XX", "2,-32,4,24", "2,32,-4,24"] {
         let input = format!("ByMONTHDAY={month_day_list}");
-        check_error(
-            by_month_day,
-            &input,
-            [BY_MONTH_DAY_LABEL, BY_MONTH_DAY_EXPECTED],
-        );
+        check_error(by_month_day, &input, month_context.clone());
+    }
+    let year_day_context = [BY_YEAR_DAY_LABEL, BY_YEAR_DAY_EXPECTED];
+    for year_day_list in ["xx", "2,XX", "2,-367,4,24", "2,367,-4,24"] {
+        let input = format!("ByYEARDAY={year_day_list}");
+        check_error(by_year_day, &input, year_day_context.clone());
+    }
+    let week_no_context = [BY_WEEK_NO_LABEL, BY_WEEK_NO_EXPECTED];
+    for week_no_list in ["xx", "2,XX", "2,-54,4,24", "2,54,-4,24"] {
+        let input = format!("ByWEEKNO={week_no_list}");
+        check_error(by_week_no, &input, week_no_context.clone());
+    }
+    for months_list in ["xx", "2,XX", "2,3,4,13", "2,0,10"] {
+        let input = format!("ByMONTH={months_list}");
+        check_error(by_month, &input, [BY_MONTH_LABEL, BY_MONTH_EXPECTED]);
     }
 }
 #[cfg(test)]
@@ -57,8 +102,9 @@ fn check_rule_part_errors() {
 fn check_error<const N: usize>(
     mut parser: impl FnMut(&mut &[u8]) -> ModalResult<RulePart>,
     input: &str,
-    context: [StrContext; N],
+    expected_context: [StrContext; N],
 ) {
+    use bstr::ByteSlice;
     let equal_sign = input.find('=').expect("Can't find an equal sign (=)");
     let result = parser.parse(B(input));
     assert!(result.is_err(), "Result isn't an error: {result:#?}");
@@ -68,8 +114,12 @@ fn check_error<const N: usize>(
         "In '{input}', error should happen after the equals sign, but {} <= {equal_sign}",
         err.offset()
     );
-    assert_eq!(err.input().as_bstr(), input);
-    assert_eq!(err.inner().context().cloned().collect::<Vec<_>>(), context);
+    assert_eq!(err.input().as_bstr(), input, "for input {input}");
+    assert_eq!(
+        err.inner().context().cloned().collect::<Vec<_>>(),
+        expected_context,
+        "for input {input}"
+    );
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
@@ -286,6 +336,50 @@ fn test_by_hour() {
     );
 }
 
+// Parse ByDay
+const BY_DAY_LABEL: StrContext = label("day of the week with optional week number");
+const BY_DAY_EXPECTED: StrContext = expected(
+    "a weekday abbreviation (SU, MO, TU, ...), optionally preceded by a nonzero number between -53 and 53 (-1 is the last week of the month or year",
+);
+fn by_day(input: &mut &[u8]) -> ModalResult<RulePart> {
+    let num = ClampedSigned::<i8> {
+        range: -53..=53,
+        label: BY_DAY_LABEL,
+        expected: BY_DAY_EXPECTED,
+    }
+    .context(BY_DAY_LABEL)
+    .context(BY_DAY_EXPECTED);
+    Caseless("BYDAY=").parse_next(input)?;
+    let maybe_with_week = (
+        opt(num),
+        weekday.context(BY_DAY_LABEL).context(BY_DAY_EXPECTED),
+    )
+        .map(|n_w| (NonZeroI8::new(n_w.0.unwrap_or(0i8)), n_w.1));
+    let by_day_list = separated(1.., cut_err(maybe_with_week), b',').parse_next(input)?;
+    Ok(RulePart::ByDay(by_day_list))
+}
+#[test]
+fn test_by_day() {
+    let z = NonZeroI8::new;
+    use Weekday::*;
+    assert_eq!(
+        by_day.parse_peek(B("byDAY=su;")),
+        Ok((B(";"), RulePart::ByDay(vec![(z(0), Sunday)]))),
+    );
+    let input = B("byday=-53su,-2mo,3tu,53we,+53th;");
+    let expected = vec![
+        (z(-53), Sunday),
+        (z(-2), Monday),
+        (z(3), Tuesday),
+        (z(53), Wednesday),
+        (z(53), Thursday),
+    ];
+    assert_eq!(
+        by_day.parse_peek(input),
+        Ok((B(";"), RulePart::ByDay(expected)))
+    );
+}
+
 // Parse ByMonthDay
 //
 const BY_MONTH_DAY_LABEL: StrContext = label("a list of days");
@@ -316,11 +410,100 @@ fn test_by_month_day() {
     );
 }
 
+// Parse ByYearDay
+//
+const BY_YEAR_DAY_LABEL: StrContext = label("a list of days");
+const BY_YEAR_DAY_EXPECTED: StrContext =
+    expected("nonzero numbers between -366 and 366 (-1 is the last day of the year)");
+fn by_year_day(input: &mut &[u8]) -> ModalResult<RulePart> {
+    let num = ClampedSigned::<i16> {
+        range: -366..=366,
+        label: BY_YEAR_DAY_LABEL,
+        expected: BY_YEAR_DAY_EXPECTED,
+    };
+    Caseless("BYYEARDAY=").parse_next(input)?;
+    let year_day_list = separated(1.., cut_err(num), b',').parse_next(input)?;
+    Ok(RulePart::ByYearDay(year_day_list))
+}
+#[test]
+fn test_by_year_day() {
+    assert_eq!(
+        by_year_day.parse_peek(B("byYEARDAY=-12;")),
+        Ok((B(";"), RulePart::ByYearDay(vec![-12i16]))),
+    );
+    assert_eq!(
+        by_year_day.parse_peek(B("byYearDay=-366,+2,3,31,+366,366;")),
+        Ok((
+            B(";"),
+            RulePart::ByYearDay(vec![-366i16, 2i16, 3i16, 31i16, 366i16, 366i16])
+        )),
+    );
+}
+
+// Parse ByWeekNo
+//
+const BY_WEEK_NO_LABEL: StrContext = label("a list of weeks");
+const BY_WEEK_NO_EXPECTED: StrContext =
+    expected("nonzero numbers between -53 and 53 (-1 is the last week of the year)");
+fn by_week_no(input: &mut &[u8]) -> ModalResult<RulePart> {
+    let num = ClampedSigned::<i8> {
+        range: -53..=53,
+        label: BY_WEEK_NO_LABEL,
+        expected: BY_WEEK_NO_EXPECTED,
+    };
+    Caseless("BYWEEKNO=").parse_next(input)?;
+    let week_no_list = separated(1.., cut_err(num), b',').parse_next(input)?;
+    Ok(RulePart::ByWeekNo(week_no_list))
+}
+#[test]
+fn test_by_week_no() {
+    assert_eq!(
+        by_week_no.parse_peek(B("byWEEKNO=-12;")),
+        Ok((B(";"), RulePart::ByWeekNo(vec![-12i8]))),
+    );
+    assert_eq!(
+        by_week_no.parse_peek(B("byWeekNo=-53,+2,3,53,+53;")),
+        Ok((
+            B(";"),
+            RulePart::ByWeekNo(vec![-53i8, 2i8, 3i8, 53i8, 53i8])
+        )),
+    );
+}
+// Parse ByMonth
+//
+const BY_MONTH_LABEL: StrContext = label("a list of month numbers");
+const BY_MONTH_EXPECTED: StrContext = expected("numbers between 1 and 12");
+fn by_month(input: &mut &[u8]) -> ModalResult<RulePart> {
+    let num = Clamped {
+        range: 1..=12,
+        label: BY_MONTH_LABEL,
+        expected: BY_MONTH_EXPECTED,
+    };
+    Caseless("BYMONTH=").parse_next(input)?;
+    let month_list = separated(1.., cut_err(num), b',').parse_next(input)?;
+    Ok(RulePart::ByMonth(month_list))
+}
+#[test]
+fn test_by_month() {
+    assert_eq!(
+        by_month.parse_peek(B("byMONTH=12;")),
+        Ok((B(";"), RulePart::ByMonth(vec![12u8]))),
+    );
+    assert_eq!(
+        by_month.parse_peek(B("bymonth=1,2,3,12;")),
+        Ok((B(";"), RulePart::ByMonth(vec![1u8, 2u8, 3u8, 12u8]))),
+    );
+}
+
 // Parse WkSt and Weekday
 //
 fn wk_st(input: &mut &[u8]) -> ModalResult<RulePart> {
     Caseless("WKST=").parse_next(input)?;
-    Ok(RulePart::WkSt(weekday(input)?))
+    let result = weekday
+        .context(WEEKDAY_LABEL)
+        .context(WEEKDAY_EXPECTED)
+        .parse_next(input);
+    Ok(RulePart::WkSt(result?))
 }
 #[test]
 fn test_wk_st() {
@@ -330,8 +513,6 @@ fn test_wk_st() {
     );
 }
 
-const WEEKDAY_LABEL: StrContext = label("weekday");
-const WEEKDAY_EXPECTED: StrContext = expected("Weekday abbreviation: SU, MO, TU, WE, TH, FR, SA");
 fn weekday(input: &mut &[u8]) -> ModalResult<Weekday> {
     use Weekday::*;
     cut_err(alt((
@@ -343,10 +524,10 @@ fn weekday(input: &mut &[u8]) -> ModalResult<Weekday> {
         Caseless(B("FR")).value(Friday),
         Caseless(B("SA")).value(Saturday),
     )))
-    .context(WEEKDAY_LABEL)
-    .context(WEEKDAY_EXPECTED)
     .parse_next(input)
 }
+const WEEKDAY_LABEL: StrContext = label("weekday");
+const WEEKDAY_EXPECTED: StrContext = expected("Weekday abbreviation: SU, MO, TU, WE, TH, FR, SA");
 #[test]
 fn test_weekday() {
     use Weekday::*;
