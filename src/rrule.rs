@@ -37,6 +37,7 @@ enum RulePart {
     ByYearDay(Vec<i16>),
     ByWeekNo(Vec<i8>),
     ByMonth(Vec<u8>),
+    BySetPos(Vec<i16>),
     WkSt(Weekday),
 }
 type SomeWeekdays = (Option<NonZeroI8>, Weekday);
@@ -53,6 +54,8 @@ pub struct Rule {
     by_year_day: Vec<i16>,
     by_week_no: Vec<i8>,
     by_month: Vec<u8>,
+    by_set_pos: Vec<i16>,
+    wk_st: Option<Weekday>,
 }
 
 #[test]
@@ -60,7 +63,6 @@ fn check_rule_part_errors() {
     check_error(freq, "FREQ=weird", [FREQ_LABEL, FREQ_EXPECTED]);
     check_error(count, "COUNT=nonnumeric", [COUNT_LABEL, COUNT_EXPECTED]);
     check_error(interval, "interval=x", [INTERVAL_LABEL, INTERVAL_EXPECTED]);
-    check_error(wk_st, "WkSt=xx", [WEEKDAY_LABEL, WEEKDAY_EXPECTED]);
     for seconds_list in ["xx", "2,XX", "2,3,4,61"] {
         let input = format!("BySeConD={seconds_list}");
         check_error(by_second, &input, [BY_SECOND_LABEL, BY_SECOND_EXPECTED]);
@@ -74,9 +76,10 @@ fn check_rule_part_errors() {
         check_error(by_hour, &input, [BY_HOUR_LABEL, BY_HOUR_EXPECTED]);
     }
     let day_context = [BY_DAY_LABEL, BY_DAY_EXPECTED];
-    check_error(by_day, "byday=-54X", day_context.clone());
-    check_error(by_day, "byday=xx", day_context.clone());
-
+    for day_list in ["xx", "12", "-54SU", "54SU", "-54X", "54X"] {
+        let input = format!("ByDay={day_list}");
+        check_error(by_day, &input, day_context.clone());
+    }
     let month_context = [BY_MONTH_DAY_LABEL, BY_MONTH_DAY_EXPECTED];
     for month_day_list in ["xx", "2,XX", "2,-32,4,24", "2,32,-4,24"] {
         let input = format!("ByMONTHDAY={month_day_list}");
@@ -96,6 +99,12 @@ fn check_rule_part_errors() {
         let input = format!("ByMONTH={months_list}");
         check_error(by_month, &input, [BY_MONTH_LABEL, BY_MONTH_EXPECTED]);
     }
+    let set_pos_context = [BY_SET_POS_LABEL, BY_SET_POS_EXPECTED];
+    for set_pos_list in ["xx", "2,XX", "2,-367,4,24", "2,367,-4,24"] {
+        let input = format!("BySETPOS={set_pos_list}");
+        check_error(by_set_pos, &input, set_pos_context.clone());
+    }
+    check_error(wk_st, "WkSt=xx", [WEEKDAY_LABEL, WEEKDAY_EXPECTED]);
 }
 #[cfg(test)]
 #[allow(clippy::needless_pass_by_value)]
@@ -492,6 +501,37 @@ fn test_by_month() {
     assert_eq!(
         by_month.parse_peek(B("bymonth=1,2,3,12;")),
         Ok((B(";"), RulePart::ByMonth(vec![1u8, 2u8, 3u8, 12u8]))),
+    );
+}
+
+// Parse BySetPos
+//
+const BY_SET_POS_LABEL: StrContext = label("a list of day positions");
+const BY_SET_POS_EXPECTED: StrContext = expected(
+    "nonzero numbers between -366 and 366 (-1 is the last day created by the other BYxxx rules)",
+);
+fn by_set_pos(input: &mut &[u8]) -> ModalResult<RulePart> {
+    let num = ClampedSigned::<i16> {
+        range: -366..=366,
+        label: BY_SET_POS_LABEL,
+        expected: BY_SET_POS_EXPECTED,
+    };
+    Caseless("BYSETPOS=").parse_next(input)?;
+    let year_day_list = separated(1.., cut_err(num), b',').parse_next(input)?;
+    Ok(RulePart::BySetPos(year_day_list))
+}
+#[test]
+fn test_by_set_pos() {
+    assert_eq!(
+        by_set_pos.parse_peek(B("bySetPos=-12;")),
+        Ok((B(";"), RulePart::BySetPos(vec![-12i16]))),
+    );
+    assert_eq!(
+        by_set_pos.parse_peek(B("bySetPos=-366,+2,3,31,+366,366;")),
+        Ok((
+            B(";"),
+            RulePart::BySetPos(vec![-366i16, 2i16, 3i16, 31i16, 366i16, 366i16])
+        )),
     );
 }
 
