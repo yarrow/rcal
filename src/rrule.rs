@@ -58,79 +58,6 @@ pub struct Rule {
     wk_st: Option<Weekday>,
 }
 
-#[test]
-fn check_rule_part_errors() {
-    check_error(freq, "FREQ=weird", [FREQ_LABEL, FREQ_EXPECTED]);
-    check_error(count, "COUNT=nonnumeric", [COUNT_LABEL, COUNT_EXPECTED]);
-    check_error(interval, "interval=x", [INTERVAL_LABEL, INTERVAL_EXPECTED]);
-    for seconds_list in ["xx", "2,XX", "2,3,4,61"] {
-        let input = format!("BySeConD={seconds_list}");
-        check_error(by_second, &input, [BY_SECOND_LABEL, BY_SECOND_EXPECTED]);
-    }
-    for minutes_list in ["xx", "2,XX", "2,3,4,60"] {
-        let input = format!("ByMINUTE={minutes_list}");
-        check_error(by_minute, &input, [BY_MINUTE_LABEL, BY_MINUTE_EXPECTED]);
-    }
-    for hours_list in ["xx", "2,XX", "2,3,4,24"] {
-        let input = format!("ByHOUR={hours_list}");
-        check_error(by_hour, &input, [BY_HOUR_LABEL, BY_HOUR_EXPECTED]);
-    }
-    let day_context = [BY_DAY_LABEL, BY_DAY_EXPECTED];
-    for day_list in ["xx", "12", "-54SU", "54SU", "-54X", "54X"] {
-        let input = format!("ByDay={day_list}");
-        check_error(by_day, &input, day_context.clone());
-    }
-    let month_context = [BY_MONTH_DAY_LABEL, BY_MONTH_DAY_EXPECTED];
-    for month_day_list in ["xx", "2,XX", "2,-32,4,24", "2,32,-4,24"] {
-        let input = format!("ByMONTHDAY={month_day_list}");
-        check_error(by_month_day, &input, month_context.clone());
-    }
-    let year_day_context = [BY_YEAR_DAY_LABEL, BY_YEAR_DAY_EXPECTED];
-    for year_day_list in ["xx", "2,XX", "2,-367,4,24", "2,367,-4,24"] {
-        let input = format!("ByYEARDAY={year_day_list}");
-        check_error(by_year_day, &input, year_day_context.clone());
-    }
-    let week_no_context = [BY_WEEK_NO_LABEL, BY_WEEK_NO_EXPECTED];
-    for week_no_list in ["xx", "2,XX", "2,-54,4,24", "2,54,-4,24"] {
-        let input = format!("ByWEEKNO={week_no_list}");
-        check_error(by_week_no, &input, week_no_context.clone());
-    }
-    for months_list in ["xx", "2,XX", "2,3,4,13", "2,0,10"] {
-        let input = format!("ByMONTH={months_list}");
-        check_error(by_month, &input, [BY_MONTH_LABEL, BY_MONTH_EXPECTED]);
-    }
-    let set_pos_context = [BY_SET_POS_LABEL, BY_SET_POS_EXPECTED];
-    for set_pos_list in ["xx", "2,XX", "2,-367,4,24", "2,367,-4,24"] {
-        let input = format!("BySETPOS={set_pos_list}");
-        check_error(by_set_pos, &input, set_pos_context.clone());
-    }
-    check_error(wk_st, "WkSt=xx", [WEEKDAY_LABEL, WEEKDAY_EXPECTED]);
-}
-#[cfg(test)]
-#[allow(clippy::needless_pass_by_value)]
-fn check_error<const N: usize>(
-    mut parser: impl FnMut(&mut &[u8]) -> ModalResult<RulePart>,
-    input: &str,
-    expected_context: [StrContext; N],
-) {
-    use bstr::ByteSlice;
-    let equal_sign = input.find('=').expect("Can't find an equal sign (=)");
-    let result = parser.parse(B(input));
-    assert!(result.is_err(), "Result isn't an error: {result:#?}");
-    let err = result.unwrap_err();
-    assert!(
-        err.offset() > equal_sign,
-        "In '{input}', error should happen after the equals sign, but {} <= {equal_sign}",
-        err.offset()
-    );
-    assert_eq!(err.input().as_bstr(), input, "for input {input}");
-    assert_eq!(
-        err.inner().context().cloned().collect::<Vec<_>>(),
-        expected_context,
-        "for input {input}"
-    );
-}
-
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 enum Frequency {
     Secondly,
@@ -154,13 +81,6 @@ fn freq(input: &mut &[u8]) -> ModalResult<RulePart> {
     Caseless("FREQ=").parse_next(input)?;
     Ok(RulePart::Freq(frequency(input)?))
 }
-#[test]
-fn test_freq() {
-    assert_eq!(
-        freq.parse_peek(B("FREQ=YeaRly,")),
-        Ok((B(","), RulePart::Freq(Frequency::Yearly)))
-    );
-}
 
 const FREQ_LABEL: StrContext = label("frequency");
 const FREQ_EXPECTED: StrContext = expected("Frequency: DAILY, WEEKLY, MONTHLY, etc");
@@ -179,17 +99,6 @@ fn frequency(input: &mut &[u8]) -> ModalResult<Frequency> {
     .context(FREQ_EXPECTED)
     .parse_next(input)
 }
-#[test]
-fn test_frequency() {
-    use Frequency::*;
-    let frequencies = [Secondly, Minutely, Hourly, Daily, Weekly, Monthly, Yearly];
-    for frq in frequencies {
-        assert_eq!(
-            frequency.parse_peek(B(&format!("{frq:?},"))),
-            Ok((B(","), frq))
-        );
-    }
-}
 
 // Parse Count
 //
@@ -203,13 +112,6 @@ fn count(input: &mut &[u8]) -> ModalResult<RulePart> {
         .parse_next(input)?;
     Ok(RulePart::Count(n))
 }
-#[test]
-fn test_count() {
-    assert_eq!(
-        count.parse_peek(B("count=42,")),
-        Ok((B(","), RulePart::Count(42)))
-    );
-}
 
 // Parse Interval
 //
@@ -222,13 +124,6 @@ fn interval(input: &mut &[u8]) -> ModalResult<RulePart> {
         .context(INTERVAL_EXPECTED)
         .parse_next(input)?;
     Ok(RulePart::Interval(n))
-}
-#[test]
-fn test_interval() {
-    assert_eq!(
-        interval.parse_peek(B("interval=42,")),
-        Ok((B(","), RulePart::Interval(42)))
-    );
 }
 
 // Clamped — for a list of seconds, minutes, or hours
@@ -281,17 +176,6 @@ fn by_second(input: &mut &[u8]) -> ModalResult<RulePart> {
     let second_list = separated(1.., cut_err(num), b',').parse_next(input)?;
     Ok(RulePart::BySecond(second_list))
 }
-#[test]
-fn test_by_second() {
-    assert_eq!(
-        by_second.parse_peek(B("bySecond=42;")),
-        Ok((B(";"), RulePart::BySecond(vec![42u8]))),
-    );
-    assert_eq!(
-        by_second.parse_peek(B("bySecond=0,1,2,3,60;")),
-        Ok((B(";"), RulePart::BySecond(vec![0u8, 1u8, 2u8, 3u8, 60u8]))),
-    );
-}
 
 // Parse ByMinute
 //
@@ -307,17 +191,6 @@ fn by_minute(input: &mut &[u8]) -> ModalResult<RulePart> {
     let minute_list = separated(1.., cut_err(num), b',').parse_next(input)?;
     Ok(RulePart::ByMinute(minute_list))
 }
-#[test]
-fn test_by_minute() {
-    assert_eq!(
-        by_minute.parse_peek(B("byMinute=42;")),
-        Ok((B(";"), RulePart::ByMinute(vec![42u8]))),
-    );
-    assert_eq!(
-        by_minute.parse_peek(B("byMinute=0,1,2,3,59;")),
-        Ok((B(";"), RulePart::ByMinute(vec![0u8, 1u8, 2u8, 3u8, 59u8]))),
-    );
-}
 
 // Parse ByHour
 //
@@ -332,17 +205,6 @@ fn by_hour(input: &mut &[u8]) -> ModalResult<RulePart> {
     Caseless("BYHOUR=").parse_next(input)?;
     let hour_list = separated(1.., cut_err(num), b',').parse_next(input)?;
     Ok(RulePart::ByHour(hour_list))
-}
-#[test]
-fn test_by_hour() {
-    assert_eq!(
-        by_hour.parse_peek(B("byHOUR=12;")),
-        Ok((B(";"), RulePart::ByHour(vec![12u8]))),
-    );
-    assert_eq!(
-        by_hour.parse_peek(B("byHour=0,1,2,3,23;")),
-        Ok((B(";"), RulePart::ByHour(vec![0u8, 1u8, 2u8, 3u8, 23u8]))),
-    );
 }
 
 // Parse ByDay
@@ -367,27 +229,6 @@ fn by_day(input: &mut &[u8]) -> ModalResult<RulePart> {
     let by_day_list = separated(1.., cut_err(maybe_with_week), b',').parse_next(input)?;
     Ok(RulePart::ByDay(by_day_list))
 }
-#[test]
-fn test_by_day() {
-    let z = NonZeroI8::new;
-    use Weekday::*;
-    assert_eq!(
-        by_day.parse_peek(B("byDAY=su;")),
-        Ok((B(";"), RulePart::ByDay(vec![(z(0), Sunday)]))),
-    );
-    let input = B("byday=-53su,-2mo,3tu,53we,+53th;");
-    let expected = vec![
-        (z(-53), Sunday),
-        (z(-2), Monday),
-        (z(3), Tuesday),
-        (z(53), Wednesday),
-        (z(53), Thursday),
-    ];
-    assert_eq!(
-        by_day.parse_peek(input),
-        Ok((B(";"), RulePart::ByDay(expected)))
-    );
-}
 
 // Parse ByMonthDay
 //
@@ -403,20 +244,6 @@ fn by_month_day(input: &mut &[u8]) -> ModalResult<RulePart> {
     Caseless("BYMONTHDAY=").parse_next(input)?;
     let month_day_list = separated(1.., cut_err(num), b',').parse_next(input)?;
     Ok(RulePart::ByMonthDay(month_day_list))
-}
-#[test]
-fn test_by_month_day() {
-    assert_eq!(
-        by_month_day.parse_peek(B("byMONTHDAY=-12;")),
-        Ok((B(";"), RulePart::ByMonthDay(vec![-12i8]))),
-    );
-    assert_eq!(
-        by_month_day.parse_peek(B("byMonthDay=-31,+2,3,31,+31;")),
-        Ok((
-            B(";"),
-            RulePart::ByMonthDay(vec![-31i8, 2i8, 3i8, 31i8, 31i8])
-        )),
-    );
 }
 
 // Parse ByYearDay
@@ -434,20 +261,6 @@ fn by_year_day(input: &mut &[u8]) -> ModalResult<RulePart> {
     let year_day_list = separated(1.., cut_err(num), b',').parse_next(input)?;
     Ok(RulePart::ByYearDay(year_day_list))
 }
-#[test]
-fn test_by_year_day() {
-    assert_eq!(
-        by_year_day.parse_peek(B("byYEARDAY=-12;")),
-        Ok((B(";"), RulePart::ByYearDay(vec![-12i16]))),
-    );
-    assert_eq!(
-        by_year_day.parse_peek(B("byYearDay=-366,+2,3,31,+366,366;")),
-        Ok((
-            B(";"),
-            RulePart::ByYearDay(vec![-366i16, 2i16, 3i16, 31i16, 366i16, 366i16])
-        )),
-    );
-}
 
 // Parse ByWeekNo
 //
@@ -464,20 +277,6 @@ fn by_week_no(input: &mut &[u8]) -> ModalResult<RulePart> {
     let week_no_list = separated(1.., cut_err(num), b',').parse_next(input)?;
     Ok(RulePart::ByWeekNo(week_no_list))
 }
-#[test]
-fn test_by_week_no() {
-    assert_eq!(
-        by_week_no.parse_peek(B("byWEEKNO=-12;")),
-        Ok((B(";"), RulePart::ByWeekNo(vec![-12i8]))),
-    );
-    assert_eq!(
-        by_week_no.parse_peek(B("byWeekNo=-53,+2,3,53,+53;")),
-        Ok((
-            B(";"),
-            RulePart::ByWeekNo(vec![-53i8, 2i8, 3i8, 53i8, 53i8])
-        )),
-    );
-}
 // Parse ByMonth
 //
 const BY_MONTH_LABEL: StrContext = label("a list of month numbers");
@@ -491,17 +290,6 @@ fn by_month(input: &mut &[u8]) -> ModalResult<RulePart> {
     Caseless("BYMONTH=").parse_next(input)?;
     let month_list = separated(1.., cut_err(num), b',').parse_next(input)?;
     Ok(RulePart::ByMonth(month_list))
-}
-#[test]
-fn test_by_month() {
-    assert_eq!(
-        by_month.parse_peek(B("byMONTH=12;")),
-        Ok((B(";"), RulePart::ByMonth(vec![12u8]))),
-    );
-    assert_eq!(
-        by_month.parse_peek(B("bymonth=1,2,3,12;")),
-        Ok((B(";"), RulePart::ByMonth(vec![1u8, 2u8, 3u8, 12u8]))),
-    );
 }
 
 // Parse BySetPos
@@ -520,20 +308,6 @@ fn by_set_pos(input: &mut &[u8]) -> ModalResult<RulePart> {
     let year_day_list = separated(1.., cut_err(num), b',').parse_next(input)?;
     Ok(RulePart::BySetPos(year_day_list))
 }
-#[test]
-fn test_by_set_pos() {
-    assert_eq!(
-        by_set_pos.parse_peek(B("bySetPos=-12;")),
-        Ok((B(";"), RulePart::BySetPos(vec![-12i16]))),
-    );
-    assert_eq!(
-        by_set_pos.parse_peek(B("bySetPos=-366,+2,3,31,+366,366;")),
-        Ok((
-            B(";"),
-            RulePart::BySetPos(vec![-366i16, 2i16, 3i16, 31i16, 366i16, 366i16])
-        )),
-    );
-}
 
 // Parse WkSt and Weekday
 //
@@ -544,13 +318,6 @@ fn wk_st(input: &mut &[u8]) -> ModalResult<RulePart> {
         .context(WEEKDAY_EXPECTED)
         .parse_next(input);
     Ok(RulePart::WkSt(result?))
-}
-#[test]
-fn test_wk_st() {
-    assert_eq!(
-        wk_st.parse_peek(B("WkST=SU,")),
-        Ok((B(","), RulePart::WkSt(Weekday::Sunday)))
-    );
 }
 
 fn weekday(input: &mut &[u8]) -> ModalResult<Weekday> {
@@ -568,19 +335,185 @@ fn weekday(input: &mut &[u8]) -> ModalResult<Weekday> {
 }
 const WEEKDAY_LABEL: StrContext = label("weekday");
 const WEEKDAY_EXPECTED: StrContext = expected("Weekday abbreviation: SU, MO, TU, WE, TH, FR, SA");
-#[test]
-fn test_weekday() {
-    use Weekday::*;
-    assert_eq!(weekday.parse_peek(B("Su,,,")), Ok((B(",,,"), Sunday)));
-    let rest = [
-        (B("mo,,,"), (B(",,,"), Monday)),
-        (B("tUggg"), (B("ggg"), Tuesday)),
-        (B("WE,,,"), (B(",,,"), Wednesday)),
-        (B("Th,,,"), (B(",,,"), Thursday)),
-        (B("fr,,,"), (B(",,,"), Friday)),
-        (B("Sa,,,"), (B(",,,"), Saturday)),
-    ];
-    for d in rest {
-        assert_eq!(weekday.parse_peek(d.0), Ok(d.1));
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn check_rule_part_results() {
+        use RulePart::*;
+        check_ok(freq, "FREQ=YeaRly", Freq(Frequency::Yearly));
+        check_ok(count, "count=42", Count(42));
+        check_ok(interval, "interval=42", Interval(42));
+        check_ok(
+            by_second,
+            "bySecond=0,1,2,3,60",
+            BySecond(vec![0u8, 1u8, 2u8, 3u8, 60u8]),
+        );
+        check_ok(
+            by_minute,
+            "byMinute=0,1,2,3,59",
+            ByMinute(vec![0u8, 1u8, 2u8, 3u8, 59u8]),
+        );
+        check_ok(
+            by_hour,
+            "byHour=0,1,2,3,23",
+            ByHour(vec![0u8, 1u8, 2u8, 3u8, 23u8]),
+        );
+        {
+            let z = NonZeroI8::new;
+            use Weekday::*;
+            check_ok(
+                by_day,
+                "byday=-53su,-2mo,3tu,53we,+53th,fr",
+                ByDay(vec![
+                    (z(-53), Sunday),
+                    (z(-2), Monday),
+                    (z(3), Tuesday),
+                    (z(53), Wednesday),
+                    (z(53), Thursday),
+                    (None, Friday),
+                ]),
+            );
+        };
+        check_ok(
+            by_month_day,
+            "byMonthDay=-31,+2,3,31,+31",
+            ByMonthDay(vec![-31i8, 2i8, 3i8, 31i8, 31i8]),
+        );
+        check_ok(
+            by_year_day,
+            "byYearDay=-366,+2,3,31,+366,366",
+            ByYearDay(vec![-366i16, 2i16, 3i16, 31i16, 366i16, 366i16]),
+        );
+        check_ok(
+            by_week_no,
+            "byWeekNo=-53,+2,3,53,+53",
+            ByWeekNo(vec![-53i8, 2i8, 3i8, 53i8, 53i8]),
+        );
+        check_ok(
+            by_month,
+            "bymonth=1,2,3,12",
+            ByMonth(vec![1u8, 2u8, 3u8, 12u8]),
+        );
+        check_ok(
+            by_set_pos,
+            "bySetPos=-366,+2,3,31,+366,366",
+            BySetPos(vec![-366i16, 2i16, 3i16, 31i16, 366i16, 366i16]),
+        );
+        check_ok(wk_st, "WkST=SU", WkSt(Weekday::Sunday));
+    }
+    fn check_ok(
+        mut parser: impl FnMut(&mut &[u8]) -> ModalResult<RulePart>,
+        input: &str,
+        result: RulePart,
+    ) {
+        let input = format!("{input};");
+        assert_eq!(
+            parser.parse_peek(B(&input)),
+            Ok((B(";"), result)),
+            "for input {input}"
+        );
+    }
+    #[test]
+    fn check_rule_part_errors() {
+        check_error(freq, "FREQ=weird", [FREQ_LABEL, FREQ_EXPECTED]);
+        check_error(count, "COUNT=nonnumeric", [COUNT_LABEL, COUNT_EXPECTED]);
+        check_error(interval, "interval=x", [INTERVAL_LABEL, INTERVAL_EXPECTED]);
+        for seconds_list in ["xx", "2,XX", "2,3,4,61"] {
+            let input = format!("BySeConD={seconds_list}");
+            check_error(by_second, &input, [BY_SECOND_LABEL, BY_SECOND_EXPECTED]);
+        }
+        for minutes_list in ["xx", "2,XX", "2,3,4,60"] {
+            let input = format!("ByMINUTE={minutes_list}");
+            check_error(by_minute, &input, [BY_MINUTE_LABEL, BY_MINUTE_EXPECTED]);
+        }
+        for hours_list in ["xx", "2,XX", "2,3,4,24"] {
+            let input = format!("ByHOUR={hours_list}");
+            check_error(by_hour, &input, [BY_HOUR_LABEL, BY_HOUR_EXPECTED]);
+        }
+        let day_context = [BY_DAY_LABEL, BY_DAY_EXPECTED];
+        for day_list in ["xx", "12", "-54SU", "54SU", "-54X", "54X"] {
+            let input = format!("ByDay={day_list}");
+            check_error(by_day, &input, day_context.clone());
+        }
+        let month_context = [BY_MONTH_DAY_LABEL, BY_MONTH_DAY_EXPECTED];
+        for month_day_list in ["xx", "2,XX", "2,-32,4,24", "2,32,-4,24"] {
+            let input = format!("ByMONTHDAY={month_day_list}");
+            check_error(by_month_day, &input, month_context.clone());
+        }
+        let year_day_context = [BY_YEAR_DAY_LABEL, BY_YEAR_DAY_EXPECTED];
+        for year_day_list in ["xx", "2,XX", "2,-367,4,24", "2,367,-4,24"] {
+            let input = format!("ByYEARDAY={year_day_list}");
+            check_error(by_year_day, &input, year_day_context.clone());
+        }
+        let week_no_context = [BY_WEEK_NO_LABEL, BY_WEEK_NO_EXPECTED];
+        for week_no_list in ["xx", "2,XX", "2,-54,4,24", "2,54,-4,24"] {
+            let input = format!("ByWEEKNO={week_no_list}");
+            check_error(by_week_no, &input, week_no_context.clone());
+        }
+        for months_list in ["xx", "2,XX", "2,3,4,13", "2,0,10"] {
+            let input = format!("ByMONTH={months_list}");
+            check_error(by_month, &input, [BY_MONTH_LABEL, BY_MONTH_EXPECTED]);
+        }
+        let set_pos_context = [BY_SET_POS_LABEL, BY_SET_POS_EXPECTED];
+        for set_pos_list in ["xx", "2,XX", "2,-367,4,24", "2,367,-4,24"] {
+            let input = format!("BySETPOS={set_pos_list}");
+            check_error(by_set_pos, &input, set_pos_context.clone());
+        }
+        check_error(wk_st, "WkSt=xx", [WEEKDAY_LABEL, WEEKDAY_EXPECTED]);
+    }
+    #[allow(clippy::needless_pass_by_value)]
+    fn check_error<const N: usize>(
+        mut parser: impl FnMut(&mut &[u8]) -> ModalResult<RulePart>,
+        input: &str,
+        expected_context: [StrContext; N],
+    ) {
+        use bstr::ByteSlice;
+        let equal_sign = input.find('=').expect("Can't find an equal sign (=)");
+        let result = parser.parse(B(input));
+        assert!(result.is_err(), "Result isn't an error: {result:#?}");
+        let err = result.unwrap_err();
+        assert!(
+            err.offset() > equal_sign,
+            "In '{input}', error should happen after the equals sign, but {} <= {equal_sign}",
+            err.offset()
+        );
+        assert_eq!(err.input().as_bstr(), input, "for input {input}");
+        assert_eq!(
+            err.inner().context().cloned().collect::<Vec<_>>(),
+            expected_context,
+            "for input {input}"
+        );
+    }
+
+    #[test]
+    fn test_frequency() {
+        use Frequency::*;
+        let frequencies = [Secondly, Minutely, Hourly, Daily, Weekly, Monthly, Yearly];
+        for frq in frequencies {
+            assert_eq!(
+                frequency.parse_peek(B(&format!("{frq:?},"))),
+                Ok((B(","), frq))
+            );
+        }
+    }
+
+    #[test]
+    fn test_weekday() {
+        use Weekday::*;
+        assert_eq!(weekday.parse_peek(B("Su,,,")), Ok((B(",,,"), Sunday)));
+        let rest = [
+            (B("mo,,,"), (B(",,,"), Monday)),
+            (B("tUggg"), (B("ggg"), Tuesday)),
+            (B("WE,,,"), (B(",,,"), Wednesday)),
+            (B("Th,,,"), (B(",,,"), Thursday)),
+            (B("fr,,,"), (B(",,,"), Friday)),
+            (B("Sa,,,"), (B(",,,"), Saturday)),
+        ];
+        for d in rest {
+            assert_eq!(weekday.parse_peek(d.0), Ok(d.1));
+        }
     }
 }
