@@ -1,7 +1,8 @@
 #![cfg_attr(
     debug_assertions,
-    allow(dead_code, unused_imports, unused_variables, unused_mut)
+    allow(dead_code, unused_imports, unused_macros, unused_mut, unused_variables)
 )]
 
 pub mod rrule;
+pub mod xrule;
 pub use jiff::civil::Weekday;
