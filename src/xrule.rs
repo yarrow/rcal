@@ -1,5 +1,7 @@
 #![allow(non_upper_case_globals)]
 
+use jiff::{civil::{Date, DateTime}, Zoned};
+
 use std::num::NonZeroI8;
 use std::ops::RangeInclusive;
 use std::str::FromStr;
@@ -10,11 +12,18 @@ use crate::Weekday;
 use bstr::{B, ByteSlice};
 use memchr::{Memchr3, memchr};
 
-use winnow::ascii::{Caseless, Int, dec_int, dec_uint};
+use winnow::ascii::{Caseless, Int, dec_int, dec_uint, crlf};
 use winnow::combinator::{alt, cut_err, fail, opt, separated};
 use winnow::error::{ContextError, ErrMode, StrContext, StrContextValue};
 use winnow::{ModalResult, Parser};
 
+#[derive(Debug, PartialEq)]
+enum Tagged {
+    CivilDate(Date),
+    CivilDateTime(DateTime),
+    ZonedDate(Zoned),
+    ZonedDateTime(Zoned),
+}
 #[derive(Debug, PartialEq, Eq, Clone)]
 enum RulePart {
     Freq(Frequency),
@@ -32,9 +41,29 @@ enum RulePart {
     WkSt(Weekday),
 }
 
+
+#[derive(Default, Debug, PartialEq)]
+struct RRule {
+    freq: Frequency,
+    count: Option<u32>,
+    until: Option<Tagged>,
+    interval: Option<usize>,
+    by_second: Option<Vec<u8>>,
+    by_minute: Option<Vec<u8>>,
+    by_hour: Option<Vec<u8>>,
+    by_day: Option<Vec<SomeWeekdays>>,
+    by_month_day: Option<Vec<i8>>,
+    by_year_day: Option<Vec<i16>>,
+    by_week_no: Option<Vec<i8>>,
+    by_month: Option<Vec<u8>>,
+    by_set_pos: Option<Vec<i16>>,
+    wk_st: Option<Weekday>,
+}
 type SomeWeekdays = (Option<NonZeroI8>, Weekday);
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
+// We derive Default only because that makes is easier to handle the `freq` field,
+// which unlike the others is not optional.
+#[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 enum Frequency {
     Secondly,
     Minutely,
@@ -42,6 +71,7 @@ enum Frequency {
     Daily,
     Weekly,
     Monthly,
+    #[default]
     Yearly,
 }
 
@@ -76,7 +106,7 @@ fn weekday(input: &mut &[u8]) -> ModalResult<Weekday> {
 
 //==============================================================================
 macro_rules! constants_for {
-    ($name:ident, $context:literal) => {
+    ($name:ident, $context:expr) => {
         paste! {
             const [<$name _as_bytes>]: &[u8] = stringify!([<$name:upper>]).as_bytes();
             const [<$name Context>]: StrContext = StrContext::Label($context);
@@ -96,13 +126,13 @@ macro_rules! i8_rule {
 }
 
 macro_rules! i16_rule {
-    ($name: ident, $min:literal, $max:literal) => {
+    ($name:ident, $min:literal, $max:literal) => {
         num_list_rule!(SignedList::<i16>, $name, $min, $max, "nonzero numbers")
     };
 }
 
 macro_rules! num_list_rule {
-    ($list: ty, $name: ident, $min:literal, $max:literal, $numbers:literal) => {
+    ($list:ty, $name:ident, $min:literal, $max:literal, $numbers:literal) => {
         paste! {
             const [<$name _as_bytes>]: &[u8] = stringify!([<$name:upper>]).as_bytes();
             const [<$name List>]: $list = $list::new(
@@ -159,6 +189,58 @@ impl Parser<&[u8], Vec<u8>, ErrMode<ContextError>> for U8list {
 }
 
 //==============================================================================
+const FREQ_needs_Frequency: &str =  "FREQ takes a frequency, from SECONDLY to YEARLY";
+const Expected_equal_sign: &str = "Expected an equal sign (=)";
+const Too_many_FREQs: &str = "RRule must have exactly one FREQ component; found multiple";
+const Unknown_component: &str = "Unrecognized RRule component";
+const FREQ_required: &str = "RRule must have a FREQ component";
+fn parse_rrule(input: &mut &[u8]) -> ModalResult<RRule> {
+    macro_rules! fail {
+        ($why:expr) => { return fail.context(StrContext::Label($why)).parse_next(input) }
+    }
+    let mut freq = None;
+    let mut rrule = RRule::default();
+    constants_for!(Freq, FREQ_needs_Frequency);
+
+    loop {
+        if crlf::<&[u8], ContextError>.parse_next(input).is_ok() { break}
+        let Some(eq) = memchr(b'=', input) else {
+            fail!(Expected_equal_sign);
+        };
+        let name = input[0..eq].as_bstr().to_ascii_uppercase();
+        *input = if eq < input.len() {
+            &input[eq + 1..]
+        } else {
+            todo!()
+        };
+        use RulePart::*;
+        match &name[..] {
+            Freq_as_bytes => if freq.is_some() {
+                fail!(Too_many_FREQs);
+            } else { freq = Some(frequency.parse_next(input)?) }
+            _ => fail!(Unknown_component),
+        }
+    }
+
+    match freq {
+        None => fail!("RRule must have a FREQ component"),
+        Some(f) => rrule.freq = f,
+    }
+
+    Ok(rrule)
+}
+#[test]
+fn test_parse_rrule() {
+    let secondly = RRule{freq: Frequency::Secondly, ..Default::default()};
+    for pair in [("\r\n", FREQ_required)] {
+        let Err(err)= parse_rrule.parse_peek(B(&pair.0)) else { panic!("No error for {pair:?}")};
+        let err = err.into_inner().unwrap();
+        let context = err.context().collect::<Vec<_>>();
+        assert_eq!(context.len(), 1);
+        assert_eq!(context[0].to_string(), format!("invalid {}", pair.1));
+    }
+}
+//==============================================================================
 fn one_part(input: &mut &[u8]) -> ModalResult<RulePart> {
 
     constants_for!(Freq, "Freq takes a frequency, from SECONDLY to YEARLY");
@@ -210,7 +292,7 @@ mod test {
     fn test_Freq() {
         use Frequency::*;
         for f in [Secondly, Minutely, Hourly, Daily, Weekly, Monthly, Yearly] {
-            let input = format!("FreQ={f:?}");
+            let input = format!("FrEQ={f:?}");
             assert_eq!(one_part.parse_peek(B(&input)), Ok((B(""), Freq(f))));
         }
         assert!(one_part.parse_peek(B("FREQ=Neverly")).is_err());
