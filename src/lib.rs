@@ -4,5 +4,5 @@
 )]
 
 pub mod rrule;
-pub mod xrule;
+pub mod yrule;
 pub use jiff::civil::Weekday;

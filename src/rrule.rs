@@ -81,7 +81,7 @@ macro_rules! constants_for {
             const [<$name _as_bytes>]: &[u8] = stringify!([<$name:upper>]).as_bytes();
             const [<$name Context>]: StrContext = StrContext::Label($context);
         }
-    }
+    };
 }
 macro_rules! u8_rule {
     ($name: ident, $min:literal, $max:literal) => {
@@ -160,7 +160,6 @@ impl Parser<&[u8], Vec<u8>, ErrMode<ContextError>> for U8list {
 
 //==============================================================================
 fn one_part(input: &mut &[u8]) -> ModalResult<RulePart> {
-
     constants_for!(Freq, "Freq takes a frequency, from SECONDLY to YEARLY");
     u8_rule!(BySecond, 0, 60);
     u8_rule!(ByMinute, 0, 59);
@@ -170,7 +169,10 @@ fn one_part(input: &mut &[u8]) -> ModalResult<RulePart> {
     i8_rule!(ByWeekNo, -53, 53);
     i16_rule!(ByYearDay, -366, 366);
     i16_rule!(BySetPos, -366, 366);
-    constants_for!(WkSt, "WkSt takes an abbreviation for the starting day of the week: SU, MO, etc");
+    constants_for!(
+        WkSt,
+        "WkSt takes an abbreviation for the starting day of the week: SU, MO, etc"
+    );
 
     let Some(eq) = memchr(b'=', input) else {
         todo!()
@@ -193,7 +195,9 @@ fn one_part(input: &mut &[u8]) -> ModalResult<RulePart> {
         ByYearDay_as_bytes => ByYearDay(ByYearDayList.clone().parse_next(input)?),
         BySetPos_as_bytes => BySetPos(BySetPosList.clone().parse_next(input)?),
         WkSt_as_bytes => WkSt(weekday.context(WkStContext).parse_next(input)?),
-        _ => fail.context(StrContext::Label("expected an RRULE part")).parse_next(input)?,
+        _ => fail
+            .context(StrContext::Label("expected an RRULE part"))
+            .parse_next(input)?,
     })
 }
 
@@ -210,7 +214,7 @@ mod test {
     fn test_Freq() {
         use Frequency::*;
         for f in [Secondly, Minutely, Hourly, Daily, Weekly, Monthly, Yearly] {
-            let input = format!("FreQ={f:?}");
+            let input = format!("FrEQ={f:?}");
             assert_eq!(one_part.parse_peek(B(&input)), Ok((B(""), Freq(f))));
         }
         assert!(one_part.parse_peek(B("FREQ=Neverly")).is_err());
@@ -219,7 +223,9 @@ mod test {
     #[test]
     fn test_WkSt() {
         use Weekday::*;
-        for d in [Sunday, Monday, Tuesday, Wednesday, Thursday, Friday, Saturday] {
+        for d in [
+            Sunday, Monday, Tuesday, Wednesday, Thursday, Friday, Saturday,
+        ] {
             let input = &format!("WkSt={d:?}")[0..7];
             let (rest, result) = one_part.parse_peek(B(&input)).unwrap();
             assert_eq!(one_part.parse_peek(B(&input)), Ok((B(""), WkSt(d))));
