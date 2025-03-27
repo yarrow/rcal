@@ -1,5 +1,3 @@
-#![allow(non_upper_case_globals)]
-
 use jiff::{
     Zoned,
     civil::{Date, DateTime},
@@ -7,16 +5,15 @@ use jiff::{
 
 use std::num::NonZeroI8;
 use std::ops::RangeInclusive;
-use std::str::FromStr;
 
 use paste::paste;
 
 use crate::Weekday;
-use bstr::{B, ByteSlice};
+use bstr::B;
 use memchr::memchr;
 
-use winnow::ascii::{Caseless, Int, crlf, dec_int, dec_uint};
-use winnow::combinator::{alt, cut_err, fail, opt, separated};
+use winnow::ascii::{Caseless, crlf, dec_uint};
+use winnow::combinator::{alt, cut_err, fail, separated};
 use winnow::error::{AddContext, ErrMode, ParserError};
 use winnow::stream::Stream;
 use winnow::{self, Parser};
@@ -80,7 +77,7 @@ impl ParserError<&[u8]> for RRuleError {
     type Inner = Self;
 
     #[inline]
-    fn from_input(input: &&[u8]) -> Self {
+    fn from_input(_input: &&[u8]) -> Self {
         Self::new()
     }
 
@@ -92,7 +89,7 @@ impl ParserError<&[u8]> for RRuleError {
 }
 
 #[derive(Default, Debug, Clone, PartialEq)]
-struct RRule {
+pub struct RRule {
     freq: Frequency,
     count: Option<u32>,
     until: Option<Tagged>,
@@ -135,6 +132,7 @@ fn frequency(input: &mut &[u8]) -> ModalResult<Frequency> {
         Caseless(B("Weekly")).value(Weekly),
         Caseless(B("Monthly")).value(Monthly),
         Caseless(B("Yearly")).value(Yearly),
+        fail.context(tag::FREQ_needs_Frequency),
     )))
     .parse_next(input)
 }
@@ -157,6 +155,7 @@ fn weekday(input: &mut &[u8]) -> ModalResult<Weekday> {
         Caseless(B("TH")).value(Thursday),
         Caseless(B("FR")).value(Friday),
         Caseless(B("SA")).value(Saturday),
+        fail.context(tag::Expected_day_abbreviation),
     )))
     .parse_next(input)
 }
@@ -172,11 +171,14 @@ impl U8list {
     }
 }
 impl Parser<&[u8], Vec<u8>, ErrMode<RRuleError>> for U8list {
-    fn parse_next(&mut self, input: &mut &[u8]) -> ResultRRule<Vec<u8>> {
+    fn parse_next(&mut self, input: &mut &[u8]) -> ModalResult<Vec<u8>> {
         let item = dec_uint::<&[u8], u8, ErrMode<RRuleError>>
             .context(self.tag)
             .verify(|n| self.range.contains(n));
-        separated(1.., cut_err(item), b',').parse_next(input)
+        match separated(1.., cut_err(item), b',').parse_next(input) {
+            Ok(value) => Ok(value),
+            Err(_) => cut_err(fail.context(self.tag)).parse_next(input),
+        }
     }
 }
 
@@ -188,43 +190,29 @@ macro_rules! too_many {
         }
     };
 }
-macro_rules! constants_for {
-    ($name:ident) => {
-        paste! {
-        // We can't use, say, "FREQ".as_bytes() in pattern matching, but we can create
-        // an equivalent constant and use that.
-            const [<$name:upper _as_bytes>]: &[u8] = stringify!([<$name:upper>]).as_bytes();
-        }
-    };
-}
 macro_rules! u8_tag {
     ($name:ident, $min:literal, $max:literal) => {
         paste! {
-            concat!(stringify!($name:upper), " takes a list of numbers from ", $min, " to ", $max)
+            concat!(stringify!([<$name:upper>]), " takes a list of numbers from ", $min, " to ", $max)
         }
     };
 }
-macro_rules! u8_list {
-    ($name:ident, $min:literal, $max:literal) => {
-        U8list::new(u8_tag!($name, $min, $max), $min..=$max)
-    };
-}
 //==============================================================================
-const FREQ_needs_Frequency: &str = "FREQ takes a frequency, from SECONDLY to YEARLY";
-const Expected_equal_sign: &str = "Expected a component name followed by an equal sign (=)";
-const Bad_usize: &str = "Expected an unsigned integer";
-const Unknown_component: &str = "Unrecognized RRule component";
-const FREQ_required: &str = "RRule must have a FREQ component";
+#[allow(non_upper_case_globals)]
+mod tag {
 
-const FREQ_as_bytes: &[u8] = "FREQ".as_bytes();
-const Too_many_FREQs: &str = "RRule must have exactly one FREQ component; found multiple";
-constants_for!(WkSt);
-constants_for!(Count);
-constants_for!(Interval);
-constants_for!(BySecond);
-
-type ResultRRule<T> = ModalResult<T>;
-fn parse_rrule(input: &mut &[u8]) -> ResultRRule<RRule> {
+    pub(super) const Expected_day_abbreviation: &str =
+        "Expected a day-of-week abbreviation: SU, MO, TU, WE, TH, FR, or SA";
+    pub(super) const FREQ_needs_Frequency: &str = "FREQ takes a frequency, from SECONDLY to YEARLY";
+    pub(super) const Expected_equal_sign: &str =
+        "Expected a component name followed by an equal sign (=)";
+    pub(super) const Bad_usize: &str = "Expected an unsigned integer";
+    pub(super) const Unknown_component: &str = "Unrecognized RRule component";
+    pub(super) const FREQ_required: &str = "RRule must have a FREQ component";
+    pub(super) const Too_many_FREQs: &str =
+        "RRule must have exactly one FREQ component; found multiple";
+}
+pub fn parse_rrule(input: &mut &[u8]) -> ModalResult<RRule> {
     macro_rules! fail {
         ($why:expr) => {
             return fail.context($why).parse_next(input)
@@ -259,20 +247,30 @@ fn parse_rrule(input: &mut &[u8]) -> ResultRRule<RRule> {
     while let Err(_) = crlf::<&[u8], RRuleError>.parse_next(input) {
         // Extract the component name into 'name' and resume parsing after the equal sign
         let Some(eq) = memchr(b'=', input) else {
-            fail!(Expected_equal_sign);
+            fail!(tag::Expected_equal_sign);
         };
         name = input[0..eq].to_vec();
         name.make_ascii_uppercase();
         *input = &input[eq + 1..];
 
+        const FREQ: &[u8] = "FREQ".as_bytes();
+        const COUNT: &[u8] = "COUNT".as_bytes();
+        const INTERVAL: &[u8] = "INTERVAL".as_bytes();
+        const BYSECOND: &[u8] = "BYSECOND".as_bytes();
+        const BYMINUTE: &[u8] = "BYMINUTE".as_bytes();
+        const BYHOUR: &[u8] = "BYHOUR".as_bytes();
+        const BYMONTH: &[u8] = "BYMONTH".as_bytes();
+        const WKST: &[u8] = "WKST".as_bytes();
         match &name[..] {
-            FREQ_as_bytes => get_single!(Freq, freq, frequency, Too_many_FREQs),
-            COUNT_as_bytes => get_single!(Count, rrule.count, dec_uint.context(Bad_usize)),
-            INTERVAL_as_bytes => get_single!(Interval, rrule.interval, dec_uint.context(Bad_usize)),
-            BYSECOND_as_bytes => get_u8_list!(BySecond, rrule.by_second, 0, 60),
-
-            WKST_as_bytes => get_single!(WkSt, rrule.wk_st, weekday),
-            _ => fail!(Unknown_component),
+            FREQ => get_single!(Freq, freq, frequency, tag::Too_many_FREQs),
+            COUNT => get_single!(Count, rrule.count, dec_uint.context(tag::Bad_usize)),
+            INTERVAL => get_single!(Interval, rrule.interval, dec_uint.context(tag::Bad_usize)),
+            BYSECOND => get_u8_list!(BySecond, rrule.by_second, 0, 60),
+            BYMINUTE => get_u8_list!(ByMinute, rrule.by_minute, 0, 59),
+            BYHOUR => get_u8_list!(ByHour, rrule.by_hour, 0, 23),
+            BYMONTH => get_u8_list!(ByMonth, rrule.by_month, 1, 12),
+            WKST => get_single!(WkSt, rrule.wk_st, weekday),
+            _ => fail!(tag::Unknown_component),
         }
         // Components are separated by semicolons
         if input.len() > 0 && input[0] == b';' {
@@ -281,7 +279,7 @@ fn parse_rrule(input: &mut &[u8]) -> ResultRRule<RRule> {
     }
 
     match freq {
-        None => fail!(FREQ_required),
+        None => fail!(tag::FREQ_required),
         Some(f) => rrule.freq = f,
     }
 
@@ -293,65 +291,77 @@ mod test {
     use super::*;
     use pretty_assertions::{assert_eq, assert_ne};
 
-    macro_rules! options {
-        ($freq:ident $(,$field:ident : $value:expr)*) => {
-            RRule{
-                freq: Frequency::$freq
-                $(,$field: Some($value))*
-                , ..Default::default()
-            }
-        };
-    }
-    macro_rules! vecs {
-        ($freq:ident $(,$field:ident : $value:expr)*) => {
-            RRule{
-                freq: Frequency::$freq
-                $(,$field: $value)*
-                , ..Default::default()
-            }
-        };
-    }
-
     #[test]
     fn test_parse_rrule_ok() {
+        macro_rules! rrule {
+            ($freq:ident $(,$field:ident : $value:expr)*) => {
+                RRule{
+                    freq: Frequency::$freq
+                    $(,$field: $value)*
+                    , ..Default::default()
+                }
+            };
+        }
         let ok_cases = [
-            ("FREQ=SECONDLY\r\n", options!(Secondly)),
-            ("count=0;FREQ=SECONDLY\r\n", options!(Secondly, count: 0)),
+            ("FREQ=SECONDLY\r\n", rrule!(Secondly)),
+            (
+                "count=0;FREQ=SECONDLY\r\n",
+                rrule!(Secondly, count: Some(0)),
+            ),
             (
                 "INTERVAL=0;FREQ=SECONDLY\r\n",
-                options!(Secondly, interval: 0),
+                rrule!(Secondly, interval: Some(0)),
             ),
             (
                 "count=0;FREQ=SECONDLY;WkSt=WE\r\n",
-                options!(Secondly, count: 0, wk_st: Weekday::Wednesday),
+                rrule!(Secondly, count: Some(0), wk_st: Some(Weekday::Wednesday)),
             ),
             (
                 "BYSECOND=0,60,9;FREQ=hourly\r\n",
-                vecs!(Hourly, by_second: vec![0,60,9]),
+                rrule!(Hourly, by_second: vec![0,60,9]),
+            ),
+            (
+                "BYMINUTE=0,59,9;FREQ=hourly\r\n",
+                rrule!(Hourly, by_minute: vec![0,59,9]),
+            ),
+            (
+                "BYHOUR=0,23,9;FREQ=yearly\r\n",
+                rrule!(Yearly, by_hour: vec![0,23,9]),
+            ),
+            (
+                "BYMONTH=1,12,9;FREQ=yearly\r\n",
+                rrule!(Yearly, by_month: vec![1,12,9]),
             ),
         ];
         for case in ok_cases {
-            assert_eq!(
-                parse_rrule.parse_peek(B(&case.0)).unwrap(),
-                (B(""), case.clone().1),
-                "Case: {}",
-                case.0
-            );
+            let result = parse_rrule.parse_peek(B(&case.0));
+            assert!(result.is_ok(), "Error for {}: {result:#?}", case.0);
+            assert_eq!(result.unwrap(), (B(""), case.clone().1), "Case: {}", case.0);
         }
     }
     #[test]
     fn test_parse_rrule_errors() {
         let error_cases = [
-            ("\r\n", FREQ_required),
-            ("", Expected_equal_sign),
-            ("Freq=Yearly", Expected_equal_sign),
-            ("Foo=bar", Unknown_component),
-            ("Freq=Yearly;FREQ=Monthly\r\n", Too_many_FREQs),
+            ("\r\n", tag::FREQ_required),
+            ("", tag::Expected_equal_sign),
+            ("Freq=Yearly", tag::Expected_equal_sign),
+            ("Foo=bar", tag::Unknown_component),
+            ("Freq=Yearly;FREQ=Monthly\r\n", tag::Too_many_FREQs),
+            ("Freq=Neverly\r\n", tag::FREQ_needs_Frequency),
             ("Freq=Yearly;WksT=MO;wkst=SU\r\n", too_many!(WkSt)),
             ("Freq=Yearly;Count=0;COUNT=4\r\n", too_many!(Count)),
-            ("Freq=Yearly;Count=-1\r\n", Bad_usize),
+            ("Freq=Yearly;Count=-1\r\n", tag::Bad_usize),
             ("Freq=Yearly;Interval=0;INTERVAL=4\r\n", too_many!(Interval)),
-            ("Freq=Yearly;Interval=-1\r\n", Bad_usize),
+            ("Freq=Yearly;Interval=-1\r\n", tag::Bad_usize),
+            ("Freq=Yearly;WKST=XX\r\n", tag::Expected_day_abbreviation),
+            ("Freq=Yearly;BySecond=0,60,61\r\n", u8_tag!(BySecond, 0, 60)),
+            ("Freq=Yearly;BySecond=0,60,-1\r\n", u8_tag!(BySecond, 0, 60)),
+            ("Freq=Yearly;ByMinute=0,59,60\r\n", u8_tag!(ByMinute, 0, 59)),
+            ("Freq=Yearly;ByMinute=0,59,-1\r\n", u8_tag!(ByMinute, 0, 59)),
+            ("Freq=Yearly;ByHour=0,23,24\r\n", u8_tag!(ByHour, 0, 23)),
+            ("Freq=Yearly;ByHour=0,23,-1\r\n", u8_tag!(ByHour, 0, 23)),
+            ("Freq=Yearly;ByMonth=1,12,13\r\n", u8_tag!(ByMonth, 1, 12)),
+            ("Freq=Yearly;ByMonth=1,12,-1\r\n", u8_tag!(ByMonth, 1, 12)),
         ];
         for case in error_cases {
             let Err(err) = parse_rrule.parse_peek(B(&case.0)) else {
@@ -365,5 +375,21 @@ mod test {
                 "Unexpected error for {case:?}:\n{err:?}\n"
             );
         }
+    }
+    #[test]
+    fn test_offsets() {
+        let mut input = "Freq=Yearly;BySecond=0,60,-1\r\n".as_bytes();
+        //                                         ^ Offset 26
+        let err = parse_rrule.parse(&mut input).unwrap_err();
+        assert_eq!(err.offset(), 26);
+        let err = err.into_inner();
+        assert_eq!(err.context(), vec![u8_tag!(BySecond, 0, 60),]);
+
+        let mut input = "Freq=Yearly;BySecond=0,61,60\r\n".as_bytes();
+        //                                      ^ Offset 23
+        let err = parse_rrule.parse(&mut input).unwrap_err();
+        assert_eq!(err.offset(), 23);
+        let err = err.into_inner();
+        assert_eq!(err.context(), vec![u8_tag!(BySecond, 0, 60),]);
     }
 }
