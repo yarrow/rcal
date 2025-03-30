@@ -1,103 +1,34 @@
-use jiff::{
-    Zoned,
-    civil::{Date, DateTime},
-};
-
-use std::num::NonZeroI8;
-use std::ops::RangeInclusive;
-
-use paste::paste;
-
 use crate::Weekday;
+use crate::error::{Error, ModalResult};
+
 use bstr::B;
+use jiff::Zoned;
+use jiff::civil::{Date, DateTime};
 use memchr::memchr;
+use paste::paste;
+use std::num::{NonZero, NonZeroI8};
+use std::ops::RangeInclusive;
+use std::ptr::NonNull;
 
 use winnow::ascii::{Caseless, Int, crlf, dec_int, dec_uint};
 use winnow::combinator::{alt, cut_err, fail, separated};
-use winnow::error::{AddContext, ErrMode, ParserError};
+use winnow::error::{AddContext, ErrMode, ParseError, ParserError};
 use winnow::stream::Stream;
 use winnow::{self, Parser};
-type ModalResult<T> = winnow::ModalResult<T, RRuleError>;
 
-#[derive(Debug)]
-pub struct RRuleError {
-    message: Vec<&'static str>,
-    cause: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
-}
-impl RRuleError {
-    #[must_use]
-    #[inline]
-    pub fn new() -> Self {
-        Self { message: Vec::new(), cause: None }
-    }
-
-    #[must_use]
-    #[inline]
-    pub fn context(&self) -> Vec<&'static str> {
-        self.message.clone()
-    }
-
-    #[must_use]
-    #[inline]
-    pub fn cause(&self) -> Option<&(dyn std::error::Error + Send + Sync + 'static)> {
-        self.cause.as_deref()
-    }
-}
-
-impl Clone for RRuleError {
-    fn clone(&self) -> Self {
-        Self {
-            message: self.message.clone(),
-            cause: self.cause.as_ref().map(|e| e.to_string().into()),
-        }
-    }
-}
-
-impl Default for RRuleError {
-    #[inline]
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl AddContext<&[u8], &'static str> for RRuleError {
-    #[inline]
-    fn add_context(
-        mut self,
-        _input: &&[u8],
-        _token_start: &<&[u8] as Stream>::Checkpoint,
-        context: &'static str,
-    ) -> Self {
-        self.message.push(context);
-        self
-    }
-}
-
-impl ParserError<&[u8]> for RRuleError {
-    type Inner = Self;
-
-    #[inline]
-    fn from_input(_input: &&[u8]) -> Self {
-        Self::new()
-    }
-
-    #[allow(clippy::inline_always)]
-    #[inline(always)]
-    fn into_inner(self) -> Result<Self::Inner, Self> {
-        Ok(self)
-    }
-}
+// Data Types
+//==============================================================================
 
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct RRule {
     freq: Frequency,
     count: Option<u32>,
     until: Option<Tagged>,
-    interval: Option<usize>,
+    interval: Option<u32>,
     by_second: Vec<u8>,
     by_minute: Vec<u8>,
     by_hour: Vec<u8>,
-    by_day: Vec<SomeWeekdays>,
+    by_day: Vec<WeekdaySpec>,
     by_month_day: Vec<i8>,
     by_year_day: Vec<i16>,
     by_week_no: Vec<i8>,
@@ -105,10 +36,10 @@ pub struct RRule {
     by_set_pos: Vec<i16>,
     wk_st: Option<Weekday>,
 }
-type SomeWeekdays = (Option<NonZeroI8>, Weekday);
 
-// We derive Default only because that makes is easier to handle the `freq` field,
+// We derive Default only because that makes it easier to handle the `freq` field,
 // which unlike the others is not optional.
+//
 #[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 enum Frequency {
     Secondly,
@@ -121,22 +52,6 @@ enum Frequency {
     Yearly,
 }
 
-//==============================================================================
-fn frequency(input: &mut &[u8]) -> ModalResult<Frequency> {
-    use Frequency::*;
-    cut_err(alt((
-        Caseless(B("Secondly")).value(Secondly),
-        Caseless(B("Minutely")).value(Minutely),
-        Caseless(B("Hourly")).value(Hourly),
-        Caseless(B("Daily")).value(Daily),
-        Caseless(B("Weekly")).value(Weekly),
-        Caseless(B("Monthly")).value(Monthly),
-        Caseless(B("Yearly")).value(Yearly),
-        fail.context(tag::FREQ_needs_Frequency),
-    )))
-    .parse_next(input)
-}
-
 #[derive(Debug, Clone, PartialEq)]
 enum Tagged {
     CivilDate(Date),
@@ -145,75 +60,30 @@ enum Tagged {
     ZonedDateTime(Zoned),
 }
 
-fn weekday(input: &mut &[u8]) -> ModalResult<Weekday> {
-    use Weekday::*;
-    cut_err(alt((
-        Caseless(B("SU")).value(Sunday),
-        Caseless(B("MO")).value(Monday),
-        Caseless(B("TU")).value(Tuesday),
-        Caseless(B("WE")).value(Wednesday),
-        Caseless(B("TH")).value(Thursday),
-        Caseless(B("FR")).value(Friday),
-        Caseless(B("SA")).value(Saturday),
-        fail.context(tag::Expected_day_abbreviation),
-    )))
-    .parse_next(input)
-}
+type WeekdaySpec = (Option<NonZeroI8>, Weekday);
 
-// Certain RRule components (BySecond, ByMinute, ByHour, and ByMonth) take as
-// values a list of indices of the relevant period: `ByMonth=1,9`, for instance,
-// refers to January and September. We call a list of such indices an IndexList
-//
-// Other components (ByMonthDay, ByYearDay, ByWeekNo, and BySetPost) take as
-// values a list of offsets into some other period. `ByMonthDay=9,-1`, for
-// instance, means the ninth and the last day of the month(s) it applies to.
-// We call a list of such offsets an OffsetList.
-
-struct IndexList {
-    tag: &'static str,
-    range: RangeInclusive<u8>,
-}
-impl IndexList {
-    const fn new(tag: &'static str, range: RangeInclusive<u8>) -> Self {
-        IndexList { tag, range }
-    }
-}
-impl Parser<&[u8], Vec<u8>, ErrMode<RRuleError>> for IndexList {
-    fn parse_next(&mut self, input: &mut &[u8]) -> ModalResult<Vec<u8>> {
-        let item = dec_uint::<&[u8], u8, ErrMode<RRuleError>>
-            .context(self.tag)
-            .verify(|n| self.range.contains(n));
-        match separated(1.., cut_err(item), b',').parse_next(input) {
-            Ok(value) => Ok(value),
-            Err(_) => cut_err(fail.context(self.tag)).parse_next(input),
-        }
-    }
-}
-
-#[derive(Clone)]
-struct OffsetList<N: Int + PartialOrd + Default> {
-    tag: &'static str,
-    range: RangeInclusive<N>,
-}
-impl<N: Int + PartialOrd + Default> OffsetList<N> {
-    const fn new(tag: &'static str, range: RangeInclusive<N>) -> Self {
-        Self { tag, range }
-    }
-}
-impl<N: Int + PartialOrd + Default> Parser<&[u8], Vec<N>, ErrMode<RRuleError>> for OffsetList<N> {
-    fn parse_next(&mut self, input: &mut &[u8]) -> ModalResult<Vec<N>> {
-        let zero = N::default();
-        let item = dec_int::<&[u8], N, ErrMode<RRuleError>>
-            .context(self.tag)
-            .verify(|n: &N| *n != zero && self.range.contains(n));
-        match separated(1.., cut_err(item), b',').parse_next(input) {
-            Ok(value) => Ok(value),
-            Err(_) => cut_err(fail.context(self.tag)).parse_next(input),
-        }
-    }
-}
-
+// Error message constants.
+// We allow non-uppercase because LONG_STRINGS_OF_UPPERCASE_ARE_HARDER_TO_READ
 //==============================================================================
+//
+#[allow(non_upper_case_globals)]
+mod tag {
+
+    pub(super) const Expected_day_abbreviation: &str =
+        "Expected a day-of-week abbreviation: SU, MO, TU, WE, TH, FR, or SA";
+    pub(super) const FREQ_needs_Frequency: &str = "FREQ takes a frequency, from SECONDLY to YEARLY";
+    pub(super) const Expected_equal_sign: &str =
+        "Expected a component name followed by an equal sign (=)";
+    pub(super) const Bad_usize: &str = "Expected an unsigned integer";
+    pub(super) const Unknown_component: &str = "Unrecognized RRule component";
+    pub(super) const FREQ_required: &str = "RRule must have a FREQ component";
+    pub(super) const Too_many_FREQs: &str =
+        "RRule must have exactly one FREQ component; found multiple";
+}
+
+// Error message macros
+//==============================================================================
+
 macro_rules! too_many {
     ($name:ident) => {
         paste! {
@@ -235,21 +105,127 @@ macro_rules! offset_tag {
         }
     };
 }
-//==============================================================================
-#[allow(non_upper_case_globals)]
-mod tag {
 
-    pub(super) const Expected_day_abbreviation: &str =
-        "Expected a day-of-week abbreviation: SU, MO, TU, WE, TH, FR, or SA";
-    pub(super) const FREQ_needs_Frequency: &str = "FREQ takes a frequency, from SECONDLY to YEARLY";
-    pub(super) const Expected_equal_sign: &str =
-        "Expected a component name followed by an equal sign (=)";
-    pub(super) const Bad_usize: &str = "Expected an unsigned integer";
-    pub(super) const Unknown_component: &str = "Unrecognized RRule component";
-    pub(super) const FREQ_required: &str = "RRule must have a FREQ component";
-    pub(super) const Too_many_FREQs: &str =
-        "RRule must have exactly one FREQ component; found multiple";
+// Parsers
+//==============================================================================
+
+fn frequency(input: &mut &[u8]) -> ModalResult<Frequency> {
+    use Frequency::*;
+    cut_err(alt((
+        Caseless(B("Secondly")).value(Secondly),
+        Caseless(B("Minutely")).value(Minutely),
+        Caseless(B("Hourly")).value(Hourly),
+        Caseless(B("Daily")).value(Daily),
+        Caseless(B("Weekly")).value(Weekly),
+        Caseless(B("Monthly")).value(Monthly),
+        Caseless(B("Yearly")).value(Yearly),
+        fail.context(tag::FREQ_needs_Frequency),
+    )))
+    .parse_next(input)
 }
+
+fn weekday(input: &mut &[u8]) -> ModalResult<Weekday> {
+    use Weekday::*;
+    cut_err(alt((
+        Caseless(B("SU")).value(Sunday),
+        Caseless(B("MO")).value(Monday),
+        Caseless(B("TU")).value(Tuesday),
+        Caseless(B("WE")).value(Wednesday),
+        Caseless(B("TH")).value(Thursday),
+        Caseless(B("FR")).value(Friday),
+        Caseless(B("SA")).value(Saturday),
+        fail.context(tag::Expected_day_abbreviation),
+    )))
+    .parse_next(input)
+}
+
+// Certain RRule components (BySecond, ByMinute, ByHour, and ByMonth) take as
+// values a list of indices of the relevant period: `ByMonth=1,9`, for instance,
+// refers to January and September. We call a list of such indices an IndexList
+//
+struct IndexList {
+    tag: &'static str,
+    range: RangeInclusive<u8>,
+}
+impl IndexList {
+    const fn new(tag: &'static str, range: RangeInclusive<u8>) -> Self {
+        IndexList { tag, range }
+    }
+}
+impl Parser<&[u8], Vec<u8>, ErrMode<Error>> for IndexList {
+    fn parse_next(&mut self, input: &mut &[u8]) -> ModalResult<Vec<u8>> {
+        let item = dec_uint::<&[u8], u8, ErrMode<Error>>
+            .context(self.tag)
+            .verify(|n| self.range.contains(n));
+        match separated(1.., cut_err(item), b',').parse_next(input) {
+            Ok(value) => Ok(value),
+            Err(_) => cut_err(fail.context(self.tag)).parse_next(input),
+        }
+    }
+}
+
+// Other components (ByMonthDay, ByYearDay, ByWeekNo, and BySetPost) take as
+// values a list of offsets into some other period. `ByMonthDay=9,-1`, for
+// instance, means the ninth and the last day of the month(s) it applies to.
+// We call a list of such offsets an OffsetList.
+//
+#[derive(Clone)]
+struct OffsetList<N: Int + PartialOrd + Default> {
+    tag: &'static str,
+    range: RangeInclusive<N>,
+}
+impl<N: Int + PartialOrd + Default> OffsetList<N> {
+    const fn new(tag: &'static str, range: RangeInclusive<N>) -> Self {
+        Self { tag, range }
+    }
+}
+impl<N: Int + PartialOrd + Default> Parser<&[u8], Vec<N>, ErrMode<Error>> for OffsetList<N> {
+    fn parse_next(&mut self, input: &mut &[u8]) -> ModalResult<Vec<N>> {
+        let zero = N::default();
+        let item = dec_int::<&[u8], N, ErrMode<Error>>
+            .context(self.tag)
+            .verify(|n: &N| *n != zero && self.range.contains(n));
+        match separated(1.., cut_err(item), b',').parse_next(input) {
+            Ok(value) => Ok(value),
+            Err(_) => cut_err(fail.context(self.tag)).parse_next(input),
+        }
+    }
+}
+
+// The ByDay component takes either an unadorned day abbreviation (ByDay=TU
+// means every Tuesday in the relvant time period), or an offset followed by
+// a day abbreviation (1TU means the first Tuesday in the relevant period, and
+// -1TU means the last Tuesday in the relevant period.)
+const BYDAY_RANGE: RangeInclusive<i8> = -53..=53;
+#[allow(non_upper_case_globals)]
+pub(super) const ByDay_tag: &str =
+    "The number part of a BYDAY list item must be nonzero and between -53 and 53";
+
+fn weekday_list(input: &mut &[u8]) -> ModalResult<Vec<WeekdaySpec>> {
+    separated(1.., cut_err(weekday_spec), b',').parse_next(input)
+}
+fn weekday_spec(input: &mut &[u8]) -> ModalResult<WeekdaySpec> {
+    let offset = match input.first() {
+        Some(ch) if (*ch == b'+') || *ch == b'-' || (b'0'..=b'9').contains(ch) => NonZero::new(
+            dec_int
+                .verify(|n| *n != 0i8 && BYDAY_RANGE.contains(n))
+                .context(ByDay_tag)
+                .parse_next(input)?,
+        ),
+        _ => None,
+    };
+    let day_of_week = weekday.parse_next(input)?;
+    Ok((offset, day_of_week))
+}
+
+/// `parse_rrule` parses a recurrence rule.  Here `input` must be a single line
+/// ending with `\cr\lf`. We use &[u8] on the assumption that the line has been
+/// unfolded using &[u8] rather than `str`. This is the easiest way to follow
+/// RFC 5545's advice: "It is possible for very simple implementations to
+/// generate improperly folded lines in the middle of a UTF-8 multi-octet
+/// sequence.  For this reason, implementations need to unfold lines in such
+/// a way to properly restore the original sequence.
+
 pub fn parse_rrule(input: &mut &[u8]) -> ModalResult<RRule> {
     macro_rules! fail {
         ($why:expr) => {
@@ -278,7 +254,6 @@ pub fn parse_rrule(input: &mut &[u8]) -> ModalResult<RRule> {
             }
         };
     }
-
     macro_rules! get_offset_list {
         ($name:ident<$N:ident>, $place:expr, $min:literal, $max:literal) => {
             if $place.is_empty() {
@@ -289,12 +264,21 @@ pub fn parse_rrule(input: &mut &[u8]) -> ModalResult<RRule> {
             }
         };
     }
+    macro_rules! get_weekday_list {
+        ($place:expr) => {
+            if $place.is_empty() {
+                $place = weekday_list.parse_next(input)?;
+            } else {
+                fail!(too_many!(ByDay))
+            }
+        };
+    }
 
     let mut freq = None;
     let mut rrule = RRule::default();
     let mut name: Vec<u8>;
     // Every RRule line must end in CRLF, so we use that to trigger end-of-parse
-    while crlf::<&[u8], RRuleError>.parse_next(input).is_err() {
+    while crlf::<&[u8], Error>.parse_next(input).is_err() {
         // Extract the component name into 'name' and resume parsing after the equal sign
         let Some(eq) = memchr(b'=', input) else {
             fail!(tag::Expected_equal_sign);
@@ -309,8 +293,12 @@ pub fn parse_rrule(input: &mut &[u8]) -> ModalResult<RRule> {
         const BYSECOND: &[u8] = "BYSECOND".as_bytes();
         const BYMINUTE: &[u8] = "BYMINUTE".as_bytes();
         const BYHOUR: &[u8] = "BYHOUR".as_bytes();
+        const BYDAY: &[u8] = "BYDAY".as_bytes();
         const BYMONTH: &[u8] = "BYMONTH".as_bytes();
         const BYMONTHDAY: &[u8] = "BYMONTHDAY".as_bytes();
+        const BYYEARDAY: &[u8] = "BYYEARDAY".as_bytes();
+        const BYWEEKNO: &[u8] = "BYWEEKNO".as_bytes();
+        const BYSETPOS: &[u8] = "BYSETPOS".as_bytes();
         const WKST: &[u8] = "WKST".as_bytes();
         match &name[..] {
             FREQ => get_single!(Freq, freq, frequency, tag::Too_many_FREQs),
@@ -319,8 +307,12 @@ pub fn parse_rrule(input: &mut &[u8]) -> ModalResult<RRule> {
             BYSECOND => get_index_list!(BySecond, rrule.by_second, 0, 60),
             BYMINUTE => get_index_list!(ByMinute, rrule.by_minute, 0, 59),
             BYHOUR => get_index_list!(ByHour, rrule.by_hour, 0, 23),
+            BYDAY => get_weekday_list!(rrule.by_day),
             BYMONTHDAY => get_offset_list!(ByMonthDay<i8>, rrule.by_month_day, -31, 31),
             BYMONTH => get_index_list!(ByMonth, rrule.by_month, 1, 12),
+            BYYEARDAY => get_offset_list!(ByYearDay<i16>, rrule.by_year_day, -366, 366),
+            BYWEEKNO => get_offset_list!(ByWeekNo<i8>, rrule.by_week_no, -53, 53),
+            BYSETPOS => get_offset_list!(BySetPos<i16>, rrule.by_set_pos, -366, 366),
             WKST => get_single!(WkSt, rrule.wk_st, weekday),
             _ => fail!(tag::Unknown_component),
         }
@@ -341,10 +333,12 @@ pub fn parse_rrule(input: &mut &[u8]) -> ModalResult<RRule> {
 #[cfg(test)]
 mod test {
     use super::*;
+    use bstr::{BString, ByteSlice};
     use pretty_assertions::{assert_eq, assert_ne};
 
     #[test]
     fn test_parse_rrule_ok() {
+        use Weekday::*;
         macro_rules! rrule {
             ($freq:ident $(,$field:ident : $value:expr)*) => {
                 RRule{
@@ -360,18 +354,42 @@ mod test {
             ("INTERVAL=0;FREQ=SECONDLY\r\n", rrule!(Secondly, interval: Some(0))),
             (
                 "count=0;FREQ=SECONDLY;WkSt=WE\r\n",
-                rrule!(Secondly, count: Some(0), wk_st: Some(Weekday::Wednesday)),
+                rrule!(Secondly, count: Some(0), wk_st: Some(Wednesday)),
             ),
             ("BYSECOND=0,60,9;FREQ=hourly\r\n", rrule!(Hourly, by_second: vec![0,60,9])),
             ("BYMINUTE=0,59,9;FREQ=hourly\r\n", rrule!(Hourly, by_minute: vec![0,59,9])),
             ("BYHOUR=0,23,9;FREQ=yearly\r\n", rrule!(Yearly, by_hour: vec![0,23,9])),
+            (
+                "BYDAY=MO,23Tu,-9sa;FREQ=yearly\r\n",
+                rrule!(Yearly, by_day: vec![
+                    (None, Monday),
+                    (NonZeroI8::new(23), Tuesday),
+                    (NonZeroI8::new(-9), Saturday)
+                ]),
+            ),
             ("BYMONTH=1,12,9;FREQ=yearly\r\n", rrule!(Yearly, by_month: vec![1,12,9])),
             ("BYMONTHDay=-31,31,9;FREQ=yearly\r\n", rrule!(Yearly, by_month_day: vec![-31,31,9])),
+            ("BYweekNO=-53,53,9;FREQ=yearly\r\n", rrule!(Yearly, by_week_no: vec![-53,53,9])),
+            ("BYYearDAY=-366,366,9;FREQ=yearly\r\n", rrule!(Yearly, by_year_day: vec![-366,366,9])),
+            //            ("BYSETpos=-366,366,9;FREQ=yearly\r\n", rrule!(Yearly, by_set_pos: vec![-366,366,9])),
         ];
         for case in ok_cases {
             let result = parse_rrule.parse_peek(B(&case.0));
-            assert!(result.is_ok(), "Error for {}: {result:#?}", case.0);
-            assert_eq!(result.unwrap(), (B(""), case.clone().1), "Case: {}", case.0);
+            if result.is_ok() {
+                assert_eq!(result.unwrap(), (B(""), case.clone().1), "Case: {}", case.0);
+            } else {
+                let mut input = case.0.as_bytes();
+                match parse_rrule.parse(&mut &input) {
+                    Ok(result) => panic!("Error on parse_peek but not parse!? Case:_{}", case.0),
+                    Err(err) => {
+                        let input = err.input().as_bstr();
+                        let offset = err.offset();
+                        let err = err.into_inner();
+                        let to_pointer = " ".repeat("input: ".len() + offset - 1);
+                        panic!("input: {input}\n{to_pointer}^\noffset: {offset}\n{err:#?}");
+                    }
+                }
+            }
         }
     }
     #[test]
@@ -395,11 +413,22 @@ mod test {
             ("Freq=Yearly;ByMinute=0,59,-1\r\n", index_tag!(ByMinute, 0, 59)),
             ("Freq=Yearly;ByHour=0,23,24\r\n", index_tag!(ByHour, 0, 23)),
             ("Freq=Yearly;ByHour=0,23,-1\r\n", index_tag!(ByHour, 0, 23)),
+            ("Freq=Yearly;bYdAY=Mo,XY,Fr\r\n", tag::Expected_day_abbreviation),
+            ("Freq=Yearly;bYdAY=Mo,0Tu\r\n", ByDay_tag),
             ("Freq=Yearly;ByMonth=1,12,13\r\n", index_tag!(ByMonth, 1, 12)),
             ("Freq=Yearly;ByMonth=1,12,-1\r\n", index_tag!(ByMonth, 1, 12)),
             ("Freq=Yearly;ByMonthDay=1,12,0\r\n", index_tag!(ByMonthDay, -31, 31)),
             ("Freq=Yearly;ByMonthDay=1,12,-32\r\n", index_tag!(ByMonthDay, -31, 31)),
             ("Freq=Yearly;ByMonthDay=1,12,32\r\n", index_tag!(ByMonthDay, -31, 31)),
+            ("Freq=Yearly;ByWeekNo=1,12,0\r\n", index_tag!(ByWeekNo, -53, 53)),
+            ("Freq=Yearly;ByWeekNo=1,12,-54\r\n", index_tag!(ByWeekNo, -53, 53)),
+            ("Freq=Yearly;ByWeekNo=1,12,54\r\n", index_tag!(ByWeekNo, -53, 53)),
+            ("Freq=Yearly;ByYearDay=1,12,0\r\n", index_tag!(ByYearDay, -366, 366)),
+            ("Freq=Yearly;ByYearDay=1,12,-367\r\n", index_tag!(ByYearDay, -366, 366)),
+            ("Freq=Yearly;ByYearDay=1,12,367\r\n", index_tag!(ByYearDay, -366, 366)),
+            ("Freq=Yearly;BySetPos=1,12,0\r\n", index_tag!(BySetPos, -366, 366)),
+            ("Freq=Yearly;BySetPos=1,12,-367\r\n", index_tag!(BySetPos, -366, 366)),
+            ("Freq=Yearly;BySetPos=1,12,367\r\n", index_tag!(BySetPos, -366, 366)),
         ];
         for case in error_cases {
             let Err(err) = parse_rrule.parse_peek(B(&case.0)) else {
@@ -410,20 +439,39 @@ mod test {
             assert_eq!(err.context(), vec![case.1], "Unexpected error for {case:?}:\n{err:?}\n");
         }
     }
+
+    fn error_info<T: std::fmt::Debug>(
+        err: Result<T, ParseError<&[u8], Error>>,
+    ) -> (usize, Vec<&'static str>) {
+        let err = err.unwrap_err();
+        let offset = err.offset();
+        (offset, err.into_inner().context())
+    }
     #[test]
     fn test_offsets() {
+        let context = vec![index_tag!(BySecond, 0, 60)];
+
         let mut input = "Freq=Yearly;BySecond=0,60,-1\r\n".as_bytes();
-        //                                         ^ Offset 26
-        let err = parse_rrule.parse(&mut input).unwrap_err();
-        assert_eq!(err.offset(), 26);
-        let err = err.into_inner();
-        assert_eq!(err.context(), vec![index_tag!(BySecond, 0, 60),]);
+        assert_eq!(error_info(parse_rrule.parse(&mut input)), (26, context.clone()),);
 
         let mut input = "Freq=Yearly;BySecond=0,61,60\r\n".as_bytes();
-        //                                      ^ Offset 23
-        let err = parse_rrule.parse(&mut input).unwrap_err();
-        assert_eq!(err.offset(), 23);
-        let err = err.into_inner();
-        assert_eq!(err.context(), vec![index_tag!(BySecond, 0, 60),]);
+        assert_eq!(error_info(parse_rrule.parse(&mut input)), (23, context.clone()),);
+    }
+
+    #[test]
+    fn test_weekday_spec_errors() {
+        for good in ["", "42", "-53", "53"] {
+            let base = BString::from(format!("{good}SX"));
+            let mut input = &base;
+            assert_eq!(
+                error_info(weekday_spec.parse(&mut &input)),
+                (good.len(), vec![tag::Expected_day_abbreviation])
+            );
+        }
+        for bad in ["0", "54", "-54"] {
+            let base = BString::from(format!("{bad}SU"));
+            let mut input = &base;
+            assert_eq!(error_info(weekday_spec.parse(&mut &input)), (0, vec![ByDay_tag]));
+        }
     }
 }
