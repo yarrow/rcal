@@ -105,14 +105,16 @@ macro_rules! index_msg {
         }
     };
 }
+// We use `stringify!($min)` below to work around a rust analyszer bug:
+// Wrong unexpected token diagnostic when passing negative numbers to concat! #19417
+// (https://github.com/rust-lang/rust-analyzer/issues/19417)
 macro_rules! offset_msg {
     ($name:ident, $min:literal, $max:literal) => {
         paste! {
-            concat!(stringify!([<$name:upper>]), " takes a list of nonzero numbers from ", $min, " to ", $max)
+            concat!(stringify!([<$name:upper>]), " takes a list of nonzero numbers from ", stringify!($min), " to ", $max)
         }
     };
 }
-
 // Parsers
 //==============================================================================
 
