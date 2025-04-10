@@ -14,11 +14,23 @@ pub struct Error {
     cause: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
 }
 impl Error {
-    /// Create an empty error
+    /// Create an error with message and cause
     #[must_use]
     #[inline]
-    pub fn new() -> Self {
-        Self { message: Vec::new(), cause: None }
+    pub fn new(
+        msg: &'static str,
+        cause: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
+    ) -> Self {
+        Self { message: vec![msg], cause }
+    }
+    /// Create an `ErrMode::Cut` error with message and cause
+    #[must_use]
+    #[inline]
+    pub fn cut(
+        msg: &'static str,
+        cause: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
+    ) -> ErrMode<Self> {
+        ErrMode::Cut(Self { message: vec![msg], cause })
     }
     /// Return the list of error messages
     #[must_use]
@@ -44,10 +56,11 @@ impl Clone for Error {
     }
 }
 
+/// Default error is empty
 impl Default for Error {
     #[inline]
     fn default() -> Self {
-        Self::new()
+        Self { message: Vec::new(), cause: None }
     }
 }
 
@@ -69,7 +82,7 @@ impl ParserError<&[u8]> for Error {
 
     #[inline]
     fn from_input(_input: &&[u8]) -> Self {
-        Self::new()
+        Self::default()
     }
 
     #[allow(clippy::inline_always)]

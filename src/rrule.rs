@@ -2,18 +2,16 @@ use crate::Weekday;
 use crate::error::{Error, ModalResult};
 
 use bstr::B;
-use jiff::Zoned;
 use jiff::civil::{Date, DateTime};
+use jiff::{Timestamp, tz::TimeZone};
 use memchr::memchr;
 use paste::paste;
 use std::num::{NonZero, NonZeroI8};
 use std::ops::RangeInclusive;
-use std::ptr::NonNull;
 
-use winnow::ascii::{Caseless, Int, crlf, dec_int, dec_uint};
-use winnow::combinator::{alt, cut_err, fail, separated};
-use winnow::error::{AddContext, ErrMode, ParseError, ParserError};
-use winnow::stream::Stream;
+use winnow::ascii::{Caseless, Int, crlf, dec_int, dec_uint, digit1};
+use winnow::combinator::{alt, cut_err, fail, opt, separated};
+use winnow::error::{ErrMode, ParseError};
 use winnow::{self, Parser};
 
 // Data Types
@@ -23,7 +21,7 @@ use winnow::{self, Parser};
 pub struct RRule {
     freq: Frequency,
     count: Option<u32>,
-    until: Option<Tagged>,
+    until: Option<When>,
     interval: Option<u32>,
     by_second: Vec<u8>,
     by_minute: Vec<u8>,
@@ -53,11 +51,10 @@ enum Frequency {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-enum Tagged {
-    CivilDate(Date),
-    CivilDateTime(DateTime),
-    ZonedDate(Zoned),
-    ZonedDateTime(Zoned),
+enum When {
+    Date(Date),
+    DateTime(DateTime),
+    Timestamp(Timestamp),
 }
 
 type WeekdaySpec = (Option<NonZeroI8>, Weekday);
@@ -86,6 +83,11 @@ mod msg {
     pub(super) const ByDay_range: super::RangeInclusive<i8> = -53..=53;
     pub(super) const Expected_ByDay_offset: &str =
         "The number part of a BYDAY list item must be nonzero and between -53 and 53";
+    pub(super) const Did_you_mean_semicolon: &str = "Did you mean to use a semicolon here?";
+    pub(super) const UNTIL_expects: &str = "UNTIL expects yyyymmdd[Thhmmss[Z]]: a date, optionally \
+        followed by T and a time, and an optional Z to indicate UTC";
+    pub(super) const Not_a_time: &str =
+        "This doesn't seem to be a legal date, date-time, or timestamp";
 }
 
 // Error message macros
@@ -148,6 +150,25 @@ fn weekday(input: &mut &[u8]) -> ModalResult<Weekday> {
     .parse_next(input)
 }
 
+fn until(input: &mut &[u8]) -> ModalResult<When> {
+    fn wrap<T: Default>(r: Result<T, jiff::Error>) -> ModalResult<T> {
+        r.map_err(|e| Error::cut(msg::Not_a_time, Some(Box::new(e))))
+    }
+    let text = (digit1, opt((b'T', digit1, opt(b'Z'))))
+        .take()
+        .context(msg::UNTIL_expects)
+        .parse_next(input)?;
+    match text.len() {
+        8 => Ok(When::Date(wrap(Date::strptime("%Y%m%d", text))?)),
+        15 => Ok(When::DateTime(wrap(DateTime::strptime("%Y%m%dT%H%M%S", text))?)),
+        16 => match DateTime::strptime("%Y%m%dT%H%M%S", &text[0..15]) {
+            Ok(dt) => Ok(When::Timestamp(wrap(TimeZone::UTC.to_timestamp(dt))?)),
+            Err(e) => Err(Error::cut(msg::Not_a_time, Some(Box::new(e)))),
+        },
+        _ => Err(Error::cut(msg::UNTIL_expects, None)),
+    }
+}
+
 // Certain RRule components (BySecond, ByMinute, ByHour, and ByMonth) take as
 // values a list of indices of the relevant period: `ByMonth=1,9`, for instance,
 // refers to January and September. We call a list of such indices an IndexList
@@ -202,7 +223,7 @@ impl<N: Int + PartialOrd + Default> Parser<&[u8], Vec<N>, ErrMode<Error>> for Of
 }
 
 // The ByDay component takes either an unadorned day abbreviation (ByDay=TU
-// means every Tuesday in the relvant time period), or an offset followed by
+// means every Tuesday in the relevant time period), or an offset followed by
 // a day abbreviation (1TU means the first Tuesday in the relevant period, and
 // -1TU means the last Tuesday in the relevant period.)
 fn weekday_list(input: &mut &[u8]) -> ModalResult<Vec<WeekdaySpec>> {
@@ -210,7 +231,7 @@ fn weekday_list(input: &mut &[u8]) -> ModalResult<Vec<WeekdaySpec>> {
 }
 fn weekday_spec(input: &mut &[u8]) -> ModalResult<WeekdaySpec> {
     let offset = match input.first() {
-        Some(ch) if (*ch == b'+') || *ch == b'-' || (b'0'..=b'9').contains(ch) => NonZero::new(
+        Some(ch) if (*ch == b'+') || *ch == b'-' || ch.is_ascii_digit() => NonZero::new(
             dec_int
                 .verify(|n| *n != 0i8 && msg::ByDay_range.contains(n))
                 .context(msg::Expected_ByDay_offset)
@@ -223,13 +244,12 @@ fn weekday_spec(input: &mut &[u8]) -> ModalResult<WeekdaySpec> {
 }
 
 /// `parse_rrule` parses a recurrence rule.  Here `input` must be a single line
-/// ending with `\cr\lf`. We use &[u8] on the assumption that the line has been
-/// unfolded using &[u8] rather than `str`. This is the easiest way to follow
+/// ending with `\cr\lf`. We use `&[u8]` on the assumption that the line has been
+/// unfolded using `&[u8]` rather than `str`. This is the easiest way to follow
 /// RFC 5545's advice: "It is possible for very simple implementations to
 /// generate improperly folded lines in the middle of a UTF-8 multi-octet
 /// sequence.  For this reason, implementations need to unfold lines in such
-/// a way to properly restore the original sequence.
-
+/// a way to properly restore the original sequence.""
 pub fn parse_rrule(input: &mut &[u8]) -> ModalResult<RRule> {
     macro_rules! fail {
         ($why:expr) => {
@@ -261,7 +281,7 @@ pub fn parse_rrule(input: &mut &[u8]) -> ModalResult<RRule> {
     macro_rules! get_offset_list {
         ($name:ident<$N:ident>, $place:expr, $min:literal, $max:literal) => {
             if $place.is_empty() {
-                $place = OffsetList::<$N>::new(index_msg!($name, $min, $max), $min..=$max)
+                $place = OffsetList::<$N>::new(offset_msg!($name, $min, $max), $min..=$max)
                     .parse_next(input)?;
             } else {
                 fail!(too_many!($name))
@@ -289,10 +309,12 @@ pub fn parse_rrule(input: &mut &[u8]) -> ModalResult<RRule> {
         };
         name = input[0..eq].to_vec();
         name.make_ascii_uppercase();
+        let old_input = *input;
         *input = &input[eq + 1..];
 
         const FREQ: &[u8] = "FREQ".as_bytes();
         const COUNT: &[u8] = "COUNT".as_bytes();
+        const UNTIL: &[u8] = "UNTIL".as_bytes();
         const INTERVAL: &[u8] = "INTERVAL".as_bytes();
         const BYSECOND: &[u8] = "BYSECOND".as_bytes();
         const BYMINUTE: &[u8] = "BYMINUTE".as_bytes();
@@ -307,6 +329,7 @@ pub fn parse_rrule(input: &mut &[u8]) -> ModalResult<RRule> {
         match &name[..] {
             FREQ => get_single!(Freq, freq, frequency, msg::Too_many_FREQs),
             COUNT => get_single!(Count, rrule.count, dec_uint.context(msg::Bad_usize)),
+            UNTIL => get_single!(Until, rrule.until, until),
             INTERVAL => get_single!(Interval, rrule.interval, dec_uint.context(msg::Bad_usize)),
             BYSECOND => get_index_list!(BySecond, rrule.by_second, 0, 60),
             BYMINUTE => get_index_list!(ByMinute, rrule.by_minute, 0, 59),
@@ -318,7 +341,12 @@ pub fn parse_rrule(input: &mut &[u8]) -> ModalResult<RRule> {
             BYWEEKNO => get_offset_list!(ByWeekNo<i8>, rrule.by_week_no, -53, 53),
             BYSETPOS => get_offset_list!(BySetPos<i16>, rrule.by_set_pos, -366, 366),
             WKST => get_single!(WkSt, rrule.wk_st, weekday),
-            _ => fail!(msg::Unknown_component),
+            _ => fail!(if name[0] == b',' {
+                *input = old_input;
+                msg::Did_you_mean_semicolon
+            } else {
+                msg::Unknown_component
+            }),
         }
         // Components are separated by semicolons
         if input.first() == Some(&b';') {
@@ -338,7 +366,8 @@ pub fn parse_rrule(input: &mut &[u8]) -> ModalResult<RRule> {
 mod test {
     use super::*;
     use bstr::{BString, ByteSlice};
-    use pretty_assertions::{assert_eq, assert_ne};
+    use jiff::civil;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn test_parse_rrule_ok() {
@@ -375,21 +404,33 @@ mod test {
             ("BYMONTHDay=-31,31,9;FREQ=yearly\r\n", rrule!(Yearly, by_month_day: vec![-31,31,9])),
             ("BYweekNO=-53,53,9;FREQ=yearly\r\n", rrule!(Yearly, by_week_no: vec![-53,53,9])),
             ("BYYearDAY=-366,366,9;FREQ=yearly\r\n", rrule!(Yearly, by_year_day: vec![-366,366,9])),
-            //            ("BYSETpos=-366,366,9;FREQ=yearly\r\n", rrule!(Yearly, by_set_pos: vec![-366,366,9])),
+            ("BYsetPOS=-366,366,9;FREQ=yearly\r\n", rrule!(Yearly, by_set_pos: vec![-366,366,9])),
+            (
+                "FREQ=Monthly;until=20000101\r\n",
+                rrule!(Monthly, until: Some(When::Date(civil::date(2000,1,1)))),
+            ),
+            (
+                "FREQ=Monthly;until=20000101T020304\r\n",
+                rrule!(Monthly, until: Some(When::DateTime(civil::datetime(2000,1,1,2,3,4,0)))),
+            ),
+            (
+                "FREQ=Monthly;until=20000101T020304Z\r\n",
+                rrule!(Monthly, until: Some(When::Timestamp(TimeZone::UTC.to_timestamp(civil::datetime(2000,1,1,2,3,4,0)).unwrap()))),
+            ),
         ];
         for case in ok_cases {
             let result = parse_rrule.parse_peek(B(&case.0));
             if result.is_ok() {
                 assert_eq!(result.unwrap(), (B(""), case.clone().1), "Case: {}", case.0);
             } else {
-                let mut input = case.0.as_bytes();
-                match parse_rrule.parse(&mut &input) {
-                    Ok(result) => panic!("Error on parse_peek but not parse!? Case:_{}", case.0),
+                let input = case.0.as_bytes();
+                match parse_rrule.parse(input) {
+                    Ok(_) => panic!("Error on parse_peek but not parse!? Case:_{}", case.0),
                     Err(err) => {
                         let input = err.input().as_bstr();
                         let offset = err.offset();
                         let err = err.into_inner();
-                        let to_pointer = " ".repeat("input: ".len() + offset - 1);
+                        let to_pointer = " ".repeat("input: ".len() + offset);
                         panic!("input: {input}\n{to_pointer}^\noffset: {offset}\n{err:#?}");
                     }
                 }
@@ -400,6 +441,7 @@ mod test {
     fn test_parse_rrule_errors() {
         let error_cases = [
             ("\r\n", msg::FREQ_required),
+            ("FREQ=Monthly,count=42\r\n", msg::Did_you_mean_semicolon),
             ("", msg::Expected_equal_sign),
             ("Freq=Yearly", msg::Expected_equal_sign),
             ("Foo=bar", msg::Unknown_component),
@@ -421,25 +463,28 @@ mod test {
             ("Freq=Yearly;bYdAY=Mo,0Tu\r\n", msg::Expected_ByDay_offset),
             ("Freq=Yearly;ByMonth=1,12,13\r\n", index_msg!(ByMonth, 1, 12)),
             ("Freq=Yearly;ByMonth=1,12,-1\r\n", index_msg!(ByMonth, 1, 12)),
-            ("Freq=Yearly;ByMonthDay=1,12,0\r\n", index_msg!(ByMonthDay, -31, 31)),
-            ("Freq=Yearly;ByMonthDay=1,12,-32\r\n", index_msg!(ByMonthDay, -31, 31)),
-            ("Freq=Yearly;ByMonthDay=1,12,32\r\n", index_msg!(ByMonthDay, -31, 31)),
-            ("Freq=Yearly;ByWeekNo=1,12,0\r\n", index_msg!(ByWeekNo, -53, 53)),
-            ("Freq=Yearly;ByWeekNo=1,12,-54\r\n", index_msg!(ByWeekNo, -53, 53)),
-            ("Freq=Yearly;ByWeekNo=1,12,54\r\n", index_msg!(ByWeekNo, -53, 53)),
-            ("Freq=Yearly;ByYearDay=1,12,0\r\n", index_msg!(ByYearDay, -366, 366)),
-            ("Freq=Yearly;ByYearDay=1,12,-367\r\n", index_msg!(ByYearDay, -366, 366)),
-            ("Freq=Yearly;ByYearDay=1,12,367\r\n", index_msg!(ByYearDay, -366, 366)),
-            ("Freq=Yearly;BySetPos=1,12,0\r\n", index_msg!(BySetPos, -366, 366)),
-            ("Freq=Yearly;BySetPos=1,12,-367\r\n", index_msg!(BySetPos, -366, 366)),
-            ("Freq=Yearly;BySetPos=1,12,367\r\n", index_msg!(BySetPos, -366, 366)),
+            ("Freq=Yearly;ByMonthDay=1,12,0\r\n", offset_msg!(ByMonthDay, -31, 31)),
+            ("Freq=Yearly;ByMonthDay=1,12,-32\r\n", offset_msg!(ByMonthDay, -31, 31)),
+            ("Freq=Yearly;ByMonthDay=1,12,32\r\n", offset_msg!(ByMonthDay, -31, 31)),
+            ("Freq=Yearly;ByWeekNo=1,12,0\r\n", offset_msg!(ByWeekNo, -53, 53)),
+            ("Freq=Yearly;ByWeekNo=1,12,-54\r\n", offset_msg!(ByWeekNo, -53, 53)),
+            ("Freq=Yearly;ByWeekNo=1,12,54\r\n", offset_msg!(ByWeekNo, -53, 53)),
+            ("Freq=Yearly;ByYearDay=1,12,0\r\n", offset_msg!(ByYearDay, -366, 366)),
+            ("Freq=Yearly;ByYearDay=1,12,-367\r\n", offset_msg!(ByYearDay, -366, 366)),
+            ("Freq=Yearly;ByYearDay=1,12,367\r\n", offset_msg!(ByYearDay, -366, 366)),
+            ("Freq=Yearly;BySetPos=1,12,0\r\n", offset_msg!(BySetPos, -366, 366)),
+            ("Freq=Yearly;BySetPos=1,12,-367\r\n", offset_msg!(BySetPos, -366, 366)),
+            ("Freq=Yearly;BySetPos=1,12,367\r\n", offset_msg!(BySetPos, -366, 366)),
+            ("Freq=Yearly;UNTIL=gagaga\r\n", msg::UNTIL_expects),
+            ("Freq=Yearly;UNTIL=1234567\r\n", msg::UNTIL_expects),
+            ("Freq=Yearly;UNTIL=123456789\r\n", msg::UNTIL_expects),
+            ("Freq=Yearly;UNTIL=20251301\r\n", msg::Not_a_time),
         ];
         for case in error_cases {
             let Err(err) = parse_rrule.parse_peek(B(&case.0)) else {
                 panic!("No error for {case:?}")
             };
             let err = err.into_inner().unwrap();
-            let context = err.context();
             assert_eq!(err.context(), vec![case.1], "Unexpected error for {case:?}:\n{err:?}\n");
         }
     }
@@ -455,28 +500,28 @@ mod test {
     fn test_offsets() {
         let context = vec![index_msg!(BySecond, 0, 60)];
 
-        let mut input = "Freq=Yearly;BySecond=0,60,-1\r\n".as_bytes();
-        assert_eq!(error_info(parse_rrule.parse(&mut input)), (26, context.clone()),);
+        let input = "Freq=Yearly;BySecond=0,60,-1\r\n".as_bytes();
+        assert_eq!(error_info(parse_rrule.parse(input)), (26, context.clone()),);
 
-        let mut input = "Freq=Yearly;BySecond=0,61,60\r\n".as_bytes();
-        assert_eq!(error_info(parse_rrule.parse(&mut input)), (23, context.clone()),);
+        let input = "Freq=Yearly;BySecond=0,61,60\r\n".as_bytes();
+        assert_eq!(error_info(parse_rrule.parse(input)), (23, context.clone()),);
     }
 
     #[test]
     fn test_weekday_spec_errors() {
         for good in ["", "42", "-53", "53"] {
             let base = BString::from(format!("{good}SX"));
-            let mut input = &base;
+            let input = &base;
             assert_eq!(
-                error_info(weekday_spec.parse(&mut &input)),
+                error_info(weekday_spec.parse(input)),
                 (good.len(), vec![msg::Expected_day_abbreviation])
             );
         }
         for bad in ["0", "54", "-54"] {
             let base = BString::from(format!("{bad}SU"));
-            let mut input = &base;
+            let input = &base;
             assert_eq!(
-                error_info(weekday_spec.parse(&mut &input)),
+                error_info(weekday_spec.parse(input)),
                 (0, vec![msg::Expected_ByDay_offset])
             );
         }
