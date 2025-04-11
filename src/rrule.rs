@@ -14,51 +14,6 @@ use winnow::combinator::{alt, cut_err, fail, opt, separated};
 use winnow::error::{ErrMode, ParseError};
 use winnow::{self, Parser};
 
-// Data Types
-//==============================================================================
-
-#[derive(Default, Debug, Clone, PartialEq)]
-pub struct RRule {
-    freq: Frequency,
-    count: Option<u32>,
-    until: Option<When>,
-    interval: Option<u32>,
-    by_second: Vec<u8>,
-    by_minute: Vec<u8>,
-    by_hour: Vec<u8>,
-    by_day: Vec<WeekdaySpec>,
-    by_month_day: Vec<i8>,
-    by_year_day: Vec<i16>,
-    by_week_no: Vec<i8>,
-    by_month: Vec<u8>,
-    by_set_pos: Vec<i16>,
-    wk_st: Option<Weekday>,
-}
-
-// We derive Default only because that makes it easier to handle the `freq` field,
-// which unlike the others is not optional.
-//
-#[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
-enum Frequency {
-    Secondly,
-    Minutely,
-    Hourly,
-    Daily,
-    Weekly,
-    Monthly,
-    #[default]
-    Yearly,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum When {
-    Date(Date),
-    DateTime(DateTime),
-    Timestamp(Timestamp),
-}
-
-type WeekdaySpec = (Option<NonZeroI8>, Weekday);
-
 // Error message constants.
 // We allow non-uppercase because LONG_STRINGS_OF_UPPERCASE_ARE_HARDER_TO_READ
 //==============================================================================
@@ -94,9 +49,12 @@ mod msg {
 //==============================================================================
 
 macro_rules! too_many {
+    (Freq) => {
+        msg::Too_many_FREQs
+    };
     ($name:ident) => {
         paste! {
-            concat!("RRule can have at most one ", stringify!([<$name:upper>]))
+            concat!("RRule can have at most one ", stringify!([<$name:upper>]), " component")
         }
     };
 }
@@ -117,9 +75,42 @@ macro_rules! offset_msg {
         }
     };
 }
-// Parsers
-//==============================================================================
 
+/// Storage for an `RRule`
+#[derive(Default, Debug, Clone, PartialEq)]
+pub struct RRule {
+    freq: Frequency,
+    count: Option<u32>,
+    until: Option<When>,
+    interval: Option<u32>,
+    by_second: Vec<u8>,
+    by_minute: Vec<u8>,
+    by_hour: Vec<u8>,
+    by_day: Vec<WeekdaySpec>,
+    by_month_day: Vec<i8>,
+    by_year_day: Vec<i16>,
+    by_week_no: Vec<i8>,
+    by_month: Vec<u8>,
+    by_set_pos: Vec<i16>,
+    wk_st: Option<Weekday>,
+}
+
+// Frequency =====================================================================
+// We derive Default only because that makes it easier to handle the `freq` field,
+// which unlike the others is not optional.
+//
+#[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
+enum Frequency {
+    Secondly,
+    Minutely,
+    Hourly,
+    Daily,
+    Weekly,
+    Monthly,
+    #[default]
+    Yearly,
+}
+// Parse a `Frequency`
 fn frequency(input: &mut &[u8]) -> ModalResult<Frequency> {
     use Frequency::*;
     cut_err(alt((
@@ -135,6 +126,8 @@ fn frequency(input: &mut &[u8]) -> ModalResult<Frequency> {
     .parse_next(input)
 }
 
+// `Weekday` and `WeekdaySpec` =============================
+// Parse a Weekday
 fn weekday(input: &mut &[u8]) -> ModalResult<Weekday> {
     use Weekday::*;
     cut_err(alt((
@@ -149,8 +142,37 @@ fn weekday(input: &mut &[u8]) -> ModalResult<Weekday> {
     )))
     .parse_next(input)
 }
+// WeekdaySpec
+type WeekdaySpec = (Option<NonZeroI8>, Weekday);
+// The ByDay component takes either an unadorned day abbreviation (ByDay=TU
+// means every Tuesday in the relevant time period), or an offset followed by
+// a day abbreviation (1TU means the first Tuesday in the relevant period, and
+// -1TU means the last Tuesday in the relevant period.)
+fn weekday_spec(input: &mut &[u8]) -> ModalResult<WeekdaySpec> {
+    let offset = match input.first() {
+        Some(ch) if (*ch == b'+') || *ch == b'-' || ch.is_ascii_digit() => NonZero::new(
+            dec_int
+                .verify(|n| *n != 0i8 && msg::ByDay_range.contains(n))
+                .context(msg::Expected_ByDay_offset)
+                .parse_next(input)?,
+        ),
+        _ => None,
+    };
+    let day_of_week = weekday.parse_next(input)?;
+    Ok((offset, day_of_week))
+}
+fn weekday_list(input: &mut &[u8]) -> ModalResult<Vec<WeekdaySpec>> {
+    separated(1.., cut_err(weekday_spec), b',').parse_next(input)
+}
 
-fn until(input: &mut &[u8]) -> ModalResult<When> {
+// When =============================================================
+#[derive(Debug, Clone, PartialEq)]
+enum When {
+    Date(Date),
+    DateTime(DateTime),
+    Timestamp(Timestamp),
+}
+fn when(input: &mut &[u8]) -> ModalResult<When> {
     fn wrap<T: Default>(r: Result<T, jiff::Error>) -> ModalResult<T> {
         r.map_err(|e| Error::cut(msg::Not_a_time, Some(Box::new(e))))
     }
@@ -222,27 +244,15 @@ impl<N: Int + PartialOrd + Default> Parser<&[u8], Vec<N>, ErrMode<Error>> for Of
     }
 }
 
-// The ByDay component takes either an unadorned day abbreviation (ByDay=TU
-// means every Tuesday in the relevant time period), or an offset followed by
-// a day abbreviation (1TU means the first Tuesday in the relevant period, and
-// -1TU means the last Tuesday in the relevant period.)
-fn weekday_list(input: &mut &[u8]) -> ModalResult<Vec<WeekdaySpec>> {
-    separated(1.., cut_err(weekday_spec), b',').parse_next(input)
-}
-fn weekday_spec(input: &mut &[u8]) -> ModalResult<WeekdaySpec> {
-    let offset = match input.first() {
-        Some(ch) if (*ch == b'+') || *ch == b'-' || ch.is_ascii_digit() => NonZero::new(
-            dec_int
-                .verify(|n| *n != 0i8 && msg::ByDay_range.contains(n))
-                .context(msg::Expected_ByDay_offset)
-                .parse_next(input)?,
-        ),
-        _ => None,
+macro_rules! list {
+    ($name:ident<$N:ident>, $min:literal, $max:literal) => {
+        OffsetList::<$N>::new(offset_msg!($name, $min, $max), $min..=$max)
     };
-    let day_of_week = weekday.parse_next(input)?;
-    Ok((offset, day_of_week))
+    ($name:ident, $min:literal, $max:literal) => {
+        IndexList::new(index_msg!($name, $min, $max), $min..=$max)
+    };
 }
-
+///
 /// `parse_rrule` parses a recurrence rule.  Here `input` must be a single line
 /// ending with `\cr\lf`. We use `&[u8]` on the assumption that the line has been
 /// unfolded using `&[u8]` rather than `str`. This is the easiest way to follow
@@ -251,55 +261,32 @@ fn weekday_spec(input: &mut &[u8]) -> ModalResult<WeekdaySpec> {
 /// sequence.  For this reason, implementations need to unfold lines in such
 /// a way to properly restore the original sequence.""
 pub fn parse_rrule(input: &mut &[u8]) -> ModalResult<RRule> {
+    let mut rrule = RRule::default();
+
     macro_rules! fail {
         ($why:expr) => {
             return fail.context($why).parse_next(input)
         };
     }
-    macro_rules! get_single {
-        ($name:ident, $place:expr, $parser:expr, $too_many:expr) => {
-            if $place.is_none() {
-                $place = Some($parser.parse_next(input)?)
+    macro_rules! get_vec {
+        ($field:ident, $parser:expr) => {
+            if rrule.$field.is_empty() {
+                rrule.$field = $parser.parse_next(input)?;
             } else {
-                fail!($too_many)
-            }
-        };
-        ($name:ident, $place:expr, $parser:expr) => {
-            get_single!($name, $place, $parser, too_many!($name))
-        };
-    }
-    macro_rules! get_index_list {
-        ($name:ident, $place:expr, $min:literal, $max:literal) => {
-            if $place.is_empty() {
-                $place =
-                    IndexList::new(index_msg!($name, $min, $max), $min..=$max).parse_next(input)?;
-            } else {
-                fail!(too_many!($name))
+                paste! { fail!(too_many!([<$field:camel>])) }
             }
         };
     }
-    macro_rules! get_offset_list {
-        ($name:ident<$N:ident>, $place:expr, $min:literal, $max:literal) => {
-            if $place.is_empty() {
-                $place = OffsetList::<$N>::new(offset_msg!($name, $min, $max), $min..=$max)
-                    .parse_next(input)?;
-            } else {
-                fail!(too_many!($name))
-            }
-        };
-    }
-    macro_rules! get_weekday_list {
-        ($place:expr) => {
-            if $place.is_empty() {
-                $place = weekday_list.parse_next(input)?;
-            } else {
-                fail!(too_many!(ByDay))
+    macro_rules! get_option {
+        ($field:ident, $parser:expr) => {
+            match rrule.$field {
+                None => rrule.$field = Some($parser.parse_next(input)?),
+                Some(_) => paste! { fail!(too_many!([<$field:camel>])) },
             }
         };
     }
 
     let mut freq = None;
-    let mut rrule = RRule::default();
     let mut name: Vec<u8>;
     // Every RRule line must end in CRLF, so we use that to trigger end-of-parse
     while crlf::<&[u8], Error>.parse_next(input).is_err() {
@@ -312,41 +299,31 @@ pub fn parse_rrule(input: &mut &[u8]) -> ModalResult<RRule> {
         let old_input = *input;
         *input = &input[eq + 1..];
 
-        const FREQ: &[u8] = "FREQ".as_bytes();
-        const COUNT: &[u8] = "COUNT".as_bytes();
-        const UNTIL: &[u8] = "UNTIL".as_bytes();
-        const INTERVAL: &[u8] = "INTERVAL".as_bytes();
-        const BYSECOND: &[u8] = "BYSECOND".as_bytes();
-        const BYMINUTE: &[u8] = "BYMINUTE".as_bytes();
-        const BYHOUR: &[u8] = "BYHOUR".as_bytes();
-        const BYDAY: &[u8] = "BYDAY".as_bytes();
-        const BYMONTH: &[u8] = "BYMONTH".as_bytes();
-        const BYMONTHDAY: &[u8] = "BYMONTHDAY".as_bytes();
-        const BYYEARDAY: &[u8] = "BYYEARDAY".as_bytes();
-        const BYWEEKNO: &[u8] = "BYWEEKNO".as_bytes();
-        const BYSETPOS: &[u8] = "BYSETPOS".as_bytes();
-        const WKST: &[u8] = "WKST".as_bytes();
         match &name[..] {
-            FREQ => get_single!(Freq, freq, frequency, msg::Too_many_FREQs),
-            COUNT => get_single!(Count, rrule.count, dec_uint.context(msg::Bad_usize)),
-            UNTIL => get_single!(Until, rrule.until, until),
-            INTERVAL => get_single!(Interval, rrule.interval, dec_uint.context(msg::Bad_usize)),
-            BYSECOND => get_index_list!(BySecond, rrule.by_second, 0, 60),
-            BYMINUTE => get_index_list!(ByMinute, rrule.by_minute, 0, 59),
-            BYHOUR => get_index_list!(ByHour, rrule.by_hour, 0, 23),
-            BYDAY => get_weekday_list!(rrule.by_day),
-            BYMONTHDAY => get_offset_list!(ByMonthDay<i8>, rrule.by_month_day, -31, 31),
-            BYMONTH => get_index_list!(ByMonth, rrule.by_month, 1, 12),
-            BYYEARDAY => get_offset_list!(ByYearDay<i16>, rrule.by_year_day, -366, 366),
-            BYWEEKNO => get_offset_list!(ByWeekNo<i8>, rrule.by_week_no, -53, 53),
-            BYSETPOS => get_offset_list!(BySetPos<i16>, rrule.by_set_pos, -366, 366),
-            WKST => get_single!(WkSt, rrule.wk_st, weekday),
-            _ => fail!(if name[0] == b',' {
-                *input = old_input;
-                msg::Did_you_mean_semicolon
-            } else {
-                msg::Unknown_component
-            }),
+            FREQ => match freq {
+                None => freq = Some(frequency.parse_next(input)?),
+                Some(_) => fail!(msg::Too_many_FREQs),
+            },
+            COUNT => get_option!(count, dec_uint.context(msg::Bad_usize)),
+            UNTIL => get_option!(until, when),
+            INTERVAL => get_option!(interval, dec_uint.context(msg::Bad_usize)),
+            BYSECOND => get_vec!(by_second, list!(BySecond, 0, 60)),
+            BYMINUTE => get_vec!(by_minute, list!(ByMinute, 0, 59)),
+            BYHOUR => get_vec!(by_hour, list!(ByHour, 0, 23)),
+            BYDAY => get_vec!(by_day, weekday_list),
+            BYMONTHDAY => get_vec!(by_month_day, list!(ByMonthDay<i8>, -31, 31)),
+            BYMONTH => get_vec!(by_month, list!(ByMonth, 1, 12)),
+            BYYEARDAY => get_vec!(by_year_day, list!(ByYearDay<i16>, -366, 366)),
+            BYWEEKNO => get_vec!(by_week_no, list!(ByWeekNo<i8>, -53, 53)),
+            BYSETPOS => get_vec!(by_set_pos, list!(BySetPos<i16>, -366, 366)),
+            WKST => get_option!(wk_st, weekday),
+            _ => {
+                if name[0] == b',' {
+                    *input = old_input;
+                    fail!(msg::Did_you_mean_semicolon);
+                }
+                fail!(msg::Unknown_component);
+            }
         }
         // Components are separated by semicolons
         if input.first() == Some(&b';') {
@@ -361,6 +338,22 @@ pub fn parse_rrule(input: &mut &[u8]) -> ModalResult<RRule> {
 
     Ok(rrule)
 }
+
+// We need these `const` definitations because we can't use `"X"`.as_bytes() in a pattern
+const FREQ: &[u8] = "FREQ".as_bytes();
+const COUNT: &[u8] = "COUNT".as_bytes();
+const UNTIL: &[u8] = "UNTIL".as_bytes();
+const INTERVAL: &[u8] = "INTERVAL".as_bytes();
+const BYSECOND: &[u8] = "BYSECOND".as_bytes();
+const BYMINUTE: &[u8] = "BYMINUTE".as_bytes();
+const BYHOUR: &[u8] = "BYHOUR".as_bytes();
+const BYDAY: &[u8] = "BYDAY".as_bytes();
+const BYMONTH: &[u8] = "BYMONTH".as_bytes();
+const BYMONTHDAY: &[u8] = "BYMONTHDAY".as_bytes();
+const BYYEARDAY: &[u8] = "BYYEARDAY".as_bytes();
+const BYWEEKNO: &[u8] = "BYWEEKNO".as_bytes();
+const BYSETPOS: &[u8] = "BYSETPOS".as_bytes();
+const WKST: &[u8] = "WKST".as_bytes();
 
 #[cfg(test)]
 mod test {
