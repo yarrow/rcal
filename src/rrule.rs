@@ -25,12 +25,12 @@ mod msg {
         "Expected a day-of-week abbreviation: SU, MO, TU, WE, TH, FR, or SA";
     pub(super) const FREQ_needs_Frequency: &str = "FREQ takes a frequency, from SECONDLY to YEARLY";
     pub(super) const Expected_equal_sign: &str =
-        "Expected a component name followed by an equal sign (=)";
+        "Expected a rule part name followed by an equal sign (=)";
     pub(super) const Bad_usize: &str = "Expected an unsigned integer";
-    pub(super) const Unknown_component: &str = "Unrecognized RRule component";
-    pub(super) const FREQ_required: &str = "RRule must have a FREQ component";
+    pub(super) const Unknown_rule_part: &str = "Unrecognized RRule rule part";
+    pub(super) const FREQ_required: &str = "RRule must have a FREQ rule part";
     pub(super) const Too_many_FREQs: &str =
-        "RRule must have exactly one FREQ component; found multiple";
+        "RRule must have exactly one FREQ rule part; found multiple";
 
     // ByDay_range is the only range that's not macro-created simultaneously with
     // the error message referring to it. We create it here so human eyes can
@@ -54,7 +54,7 @@ macro_rules! too_many {
     };
     ($name:ident) => {
         paste! {
-            concat!("RRule can have at most one ", stringify!([<$name:upper>]), " component")
+            concat!("RRule can have at most one ", stringify!([<$name:upper>]), " rule part")
         }
     };
 }
@@ -144,7 +144,7 @@ fn weekday(input: &mut &[u8]) -> ModalResult<Weekday> {
 }
 // WeekdaySpec
 type WeekdaySpec = (Option<NonZeroI8>, Weekday);
-// The ByDay component takes either an unadorned day abbreviation (ByDay=TU
+// The ByDay rule part takes either an unadorned day abbreviation (ByDay=TU
 // means every Tuesday in the relevant time period), or an offset followed by
 // a day abbreviation (1TU means the first Tuesday in the relevant period, and
 // -1TU means the last Tuesday in the relevant period.)
@@ -191,7 +191,7 @@ fn when(input: &mut &[u8]) -> ModalResult<When> {
     }
 }
 
-// Certain RRule components (BySecond, ByMinute, ByHour, and ByMonth) take as
+// Certain RRule rule parts (BySecond, ByMinute, ByHour, and ByMonth) take as
 // values a list of indices of the relevant period: `ByMonth=1,9`, for instance,
 // refers to January and September. We call a list of such indices an IndexList
 //
@@ -216,7 +216,7 @@ impl Parser<&[u8], Vec<u8>, ErrMode<Error>> for IndexList {
     }
 }
 
-// Other components (ByMonthDay, ByYearDay, ByWeekNo, and BySetPost) take as
+// Other rule parts (ByMonthDay, ByYearDay, ByWeekNo, and BySetPost) take as
 // values a list of offsets into some other period. `ByMonthDay=9,-1`, for
 // instance, means the ninth and the last day of the month(s) it applies to.
 // We call a list of such offsets an OffsetList.
@@ -290,7 +290,7 @@ pub fn parse_rrule(input: &mut &[u8]) -> ModalResult<RRule> {
     let mut name: Vec<u8>;
     // Every RRule line must end in CRLF, so we use that to trigger end-of-parse
     while crlf::<&[u8], Error>.parse_next(input).is_err() {
-        // Extract the component name into 'name' and resume parsing after the equal sign
+        // Extract the rule part name into 'name' and resume parsing after the equal sign
         let Some(eq) = memchr(b'=', input) else {
             fail!(msg::Expected_equal_sign);
         };
@@ -322,10 +322,10 @@ pub fn parse_rrule(input: &mut &[u8]) -> ModalResult<RRule> {
                     *input = old_input;
                     fail!(msg::Did_you_mean_semicolon);
                 }
-                fail!(msg::Unknown_component);
+                fail!(msg::Unknown_rule_part);
             }
         }
-        // Components are separated by semicolons
+        // Rule parts are separated by semicolons
         if input.first() == Some(&b';') {
             *input = &input[1..];
         }
@@ -437,7 +437,7 @@ mod test {
             ("FREQ=Monthly,count=42\r\n", msg::Did_you_mean_semicolon),
             ("", msg::Expected_equal_sign),
             ("Freq=Yearly", msg::Expected_equal_sign),
-            ("Foo=bar", msg::Unknown_component),
+            ("Foo=bar", msg::Unknown_rule_part),
             ("Freq=Yearly;FREQ=Monthly\r\n", msg::Too_many_FREQs),
             ("Freq=Neverly\r\n", msg::FREQ_needs_Frequency),
             ("Freq=Yearly;WksT=MO;wkst=SU\r\n", too_many!(WkSt)),
