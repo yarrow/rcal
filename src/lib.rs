@@ -5,4 +5,6 @@
 
 pub mod error;
 pub mod rrule;
+pub(crate) mod unfolded;
 pub use jiff::civil::Weekday;
+pub use unfolded::unfold;
