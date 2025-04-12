@@ -11,7 +11,7 @@ use std::ops::RangeInclusive;
 
 use winnow::ascii::{Caseless, Int, crlf, dec_int, dec_uint, digit1};
 use winnow::combinator::{alt, cut_err, fail, opt, separated};
-use winnow::error::{ErrMode, ParseError};
+use winnow::error::ErrMode;
 use winnow::{self, Parser};
 
 // Error message constants.
@@ -339,7 +339,7 @@ pub fn parse_rrule(input: &mut &[u8]) -> ModalResult<RRule> {
     Ok(rrule)
 }
 
-// We need these `const` definitations because we can't use `"X"`.as_bytes() in a pattern
+// We need these `const` definitations because we can't use `"X".as_bytes()` in a pattern
 const FREQ: &[u8] = "FREQ".as_bytes();
 const COUNT: &[u8] = "COUNT".as_bytes();
 const UNTIL: &[u8] = "UNTIL".as_bytes();
@@ -361,6 +361,7 @@ mod test {
     use bstr::{BString, ByteSlice};
     use jiff::civil;
     use pretty_assertions::assert_eq;
+    use winnow::error::ParseError;
 
     #[test]
     fn test_parse_rrule_ok() {

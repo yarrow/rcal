@@ -1,10 +1,10 @@
 [package]
-name = "rrule-jiff"
+name = "ical-jiff"
 version = "0.1.0"
 edition = "2024"
-description = "Parse RFC 5545 (iCalendar) RRULE content lines, using jiff for date/time values"
+description = "iCalendar parser, using jiff for date/time values"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/yarrow/rrule-jiff"
+repository = "https://github.com/yarrow/ical-jiff"
 readme = "README.md"
 keywords = ["RFC5545", "recurrence-rule", "rrule", "iCal", "iCalendar"]
 categories = ["date-and-time", "parser-implementations"]
