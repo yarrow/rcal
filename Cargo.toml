@@ -36,6 +36,7 @@ items_after_statements = "allow"
 enum_glob_use = "allow"
 ref_option = "allow"
 redundant_closure_for_method_calls = "allow"
+single_match_else = "allow"
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"
