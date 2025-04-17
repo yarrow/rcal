@@ -9,12 +9,23 @@ readme = "README.md"
 keywords = ["RFC5545", "recurrence-rule", "rrule", "iCal", "iCalendar"]
 categories = ["date-and-time", "parser-implementations"]
 
+[lib]
+name = "ical_jiff"
+path = "src/lib.rs"
+
 [dependencies]
 bstr = { version = "1.11.3", default-features = false, features = ["std"] }
+heck = "0.5.0"
+indexmap = "2.9.0"
+iota = "0.2.3"
 jiff = "0.2.4"
+litemap = "0.7.5"
 memchr = "2.7.4"
+nonempty = "0.11.0"
 paste = "1.0.15"
+rustc-hash = "2.1.1"
 winnow = "0.7.4"
+xmacro = "0.4.0"
 
 [lints.rust]
 warnings = "deny"
