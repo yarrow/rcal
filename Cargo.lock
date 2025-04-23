@@ -37,25 +37,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
-name = "ical-jiff"
-version = "0.1.0"
-dependencies = [
- "bstr",
- "heck",
- "indexmap",
- "iota",
- "jiff",
- "litemap",
- "memchr",
- "nonempty",
- "paste",
- "pretty_assertions",
- "rustc-hash",
- "winnow",
- "xmacro",
-]
-
-[[package]]
 name = "indexmap"
 version = "2.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -192,6 +173,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "rcal"
+version = "0.1.0"
+dependencies = [
+ "bstr",
+ "heck",
+ "indexmap",
+ "iota",
+ "jiff",
+ "litemap",
+ "memchr",
+ "nonempty",
+ "paste",
+ "pretty_assertions",
+ "rustc-hash",
+ "thiserror",
+ "winnow",
+ "xmacro",
+]
+
+[[package]]
 name = "rustc-hash"
 version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -232,6 +233,26 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "thiserror"
+version = "2.0.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "567b8a2dae586314f7be2a752ec7474332959c6460e02bde30d702a66d488708"
+dependencies = [
+ "thiserror-impl",
+]
+
+[[package]]
+name = "thiserror-impl"
+version = "2.0.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f7cf42b4507d8ea322120659672cf1b9dbb93f8f2d4ecfd6e51350ff5b17a1d"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
