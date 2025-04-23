@@ -1,5 +1,5 @@
 use crate::Weekday;
-use crate::error::{Error, ModalResult};
+use crate::rrule_error::{ModalResult, RRuleError};
 
 use bstr::B;
 use jiff::civil::{Date, DateTime};
@@ -174,7 +174,7 @@ enum When {
 }
 fn when(input: &mut &[u8]) -> ModalResult<When> {
     fn wrap<T: Default>(r: Result<T, jiff::Error>) -> ModalResult<T> {
-        r.map_err(|e| Error::cut(msg::Not_a_time, Some(Box::new(e))))
+        r.map_err(|e| RRuleError::cut(msg::Not_a_time, Some(Box::new(e))))
     }
     let text = (digit1, opt((b'T', digit1, opt(b'Z'))))
         .take()
@@ -185,9 +185,9 @@ fn when(input: &mut &[u8]) -> ModalResult<When> {
         15 => Ok(When::DateTime(wrap(DateTime::strptime("%Y%m%dT%H%M%S", text))?)),
         16 => match DateTime::strptime("%Y%m%dT%H%M%S", &text[0..15]) {
             Ok(dt) => Ok(When::Timestamp(wrap(TimeZone::UTC.to_timestamp(dt))?)),
-            Err(e) => Err(Error::cut(msg::Not_a_time, Some(Box::new(e)))),
+            Err(e) => Err(RRuleError::cut(msg::Not_a_time, Some(Box::new(e)))),
         },
-        _ => Err(Error::cut(msg::UNTIL_expects, None)),
+        _ => Err(RRuleError::cut(msg::UNTIL_expects, None)),
     }
 }
 
@@ -204,9 +204,9 @@ impl IndexList {
         IndexList { msg, range }
     }
 }
-impl Parser<&[u8], Vec<u8>, ErrMode<Error>> for IndexList {
+impl Parser<&[u8], Vec<u8>, ErrMode<RRuleError>> for IndexList {
     fn parse_next(&mut self, input: &mut &[u8]) -> ModalResult<Vec<u8>> {
-        let item = dec_uint::<&[u8], u8, ErrMode<Error>>
+        let item = dec_uint::<&[u8], u8, ErrMode<RRuleError>>
             .context(self.msg)
             .verify(|n| self.range.contains(n));
         match separated(1.., cut_err(item), b',').parse_next(input) {
@@ -231,10 +231,10 @@ impl<N: Int + PartialOrd + Default> OffsetList<N> {
         Self { msg, range }
     }
 }
-impl<N: Int + PartialOrd + Default> Parser<&[u8], Vec<N>, ErrMode<Error>> for OffsetList<N> {
+impl<N: Int + PartialOrd + Default> Parser<&[u8], Vec<N>, ErrMode<RRuleError>> for OffsetList<N> {
     fn parse_next(&mut self, input: &mut &[u8]) -> ModalResult<Vec<N>> {
         let zero = N::default();
-        let item = dec_int::<&[u8], N, ErrMode<Error>>
+        let item = dec_int::<&[u8], N, ErrMode<RRuleError>>
             .context(self.msg)
             .verify(|n: &N| *n != zero && self.range.contains(n));
         match separated(1.., cut_err(item), b',').parse_next(input) {
@@ -289,7 +289,7 @@ pub fn parse_rrule(input: &mut &[u8]) -> ModalResult<RRule> {
     let mut freq = None;
     let mut name: Vec<u8>;
     // Every RRule line must end in CRLF, so we use that to trigger end-of-parse
-    while crlf::<&[u8], Error>.parse_next(input).is_err() {
+    while crlf::<&[u8], RRuleError>.parse_next(input).is_err() {
         // Extract the rule part name into 'name' and resume parsing after the equal sign
         let Some(eq) = memchr(b'=', input) else {
             fail!(msg::Expected_equal_sign);
@@ -484,7 +484,7 @@ mod test {
     }
 
     fn error_info<T: std::fmt::Debug>(
-        err: Result<T, ParseError<&[u8], Error>>,
+        err: Result<T, ParseError<&[u8], RRuleError>>,
     ) -> (usize, Vec<&'static str>) {
         let err = err.unwrap_err();
         let offset = err.offset();

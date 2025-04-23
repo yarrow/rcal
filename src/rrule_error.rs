@@ -5,15 +5,15 @@
 use winnow::error::{AddContext, ErrMode, ParserError};
 use winnow::stream::Stream;
 
-pub(crate) type ModalResult<T> = winnow::ModalResult<T, Error>;
+pub(crate) type ModalResult<T> = winnow::ModalResult<T, RRuleError>;
 
 /// Our `Error` type is modeled on `winnow::error::ContextError`
 #[derive(Debug)]
-pub struct Error {
+pub struct RRuleError {
     message: Vec<&'static str>,
     cause: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
 }
-impl Error {
+impl RRuleError {
     /// Create an error with message and cause
     #[must_use]
     #[inline]
@@ -47,7 +47,7 @@ impl Error {
     }
 }
 
-impl Clone for Error {
+impl Clone for RRuleError {
     fn clone(&self) -> Self {
         Self {
             message: self.message.clone(),
@@ -57,14 +57,14 @@ impl Clone for Error {
 }
 
 /// Default error is empty
-impl Default for Error {
+impl Default for RRuleError {
     #[inline]
     fn default() -> Self {
         Self { message: Vec::new(), cause: None }
     }
 }
 
-impl AddContext<&[u8], &'static str> for Error {
+impl AddContext<&[u8], &'static str> for RRuleError {
     #[inline]
     fn add_context(
         mut self,
@@ -77,7 +77,7 @@ impl AddContext<&[u8], &'static str> for Error {
     }
 }
 
-impl ParserError<&[u8]> for Error {
+impl ParserError<&[u8]> for RRuleError {
     type Inner = Self;
 
     #[inline]
