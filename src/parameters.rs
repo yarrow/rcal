@@ -1,5 +1,5 @@
 use indexmap::IndexSet;
-use jiff::SignedDuration;
+pub use jiff::SignedDuration;
 use litemap::LiteMap;
 use rustc_hash::FxBuildHasher;
 use std::borrow::Cow;
@@ -280,6 +280,9 @@ xmacro! {
         const $CONST: usize = $?0;
     }
     impl Parameters {
+        pub fn default() -> Self {
+            Self(LiteMap::new())
+        }
         ${
             #[doc = $RFC]
             #[doc = ""]

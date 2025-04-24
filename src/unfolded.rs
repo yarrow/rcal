@@ -1,124 +1,223 @@
-use bstr::BString;
-use bstr::io::{BufReadExt, ByteLines};
-use std::io;
-use std::iter::{Fuse, FusedIterator};
+use memchr::memchr;
+use std::io::{self, ErrorKind};
+use thiserror::Error;
 
-/// An iterator over the unfolded content lines of an iCal calendar file, annotated with the
-/// starting line number (in the original, folded source) where the unfolded line starts.
-#[derive(Debug)]
-pub struct Unfolded<B: io::BufRead> {
-    source_lines: Fuse<ByteLines<B>>, // We may call `source_lines.next()` after it's returned `None`
-    lines_read: usize,                // How many source lines have we read?
-    start_of_content_line: usize,     // Which source line is the start of the current content line
-    waiting: Option<BString>,         // When we read a source line that *doesn't* start with a
-                                      // space or tab, we return the content line we were working
-                                      // on, and store the source line in `waiting` to start the
-                                      // next content line.
-}
-
-impl<B: io::BufRead> Unfolded<B> {
-    /// Returns an iterator that returns `(n, line)` pairs where `n` is the starting line number
-    /// (in the original, folded source) and `line` is the unfolded iCal content line starting at
-    /// `n`. The line in each pair is a`bstr::BString`. From the `bstr` documentation:
-    ///
-    /// > Byte strings are just like standard Unicode strings with one very important
-    /// > difference: byte strings are only *conventionally* UTF-8 while Rust’s standard
-    /// > Unicode strings are *guaranteed* to be valid UTF-8.
-    ///
-    /// We must treat the folded source file lines as byte strings, since RFC 5545 warns:
-    ///
-    /// > Note: It is possible for very simple implementations to generate
-    /// > improperly folded lines in the middle of a UTF-8 multi-octet
-    /// > sequence.  For this reason, implementations need to unfold lines
-    /// > in such a way to properly restore the original sequence.
-    ///
-    /// We keep the byte string representation unless and until we need to print or return a string
-    /// — at which point we use the `bstr` crate's `to_string` to create a valid UTF-8 by
-    /// substituting the Unicode replacement codepoint (�) for invalid UTF-8 bytes.
-    ///
-    /// We allow either `\r\n` or just `\n` as line endings in the source file.
-    ///
-    pub fn lines(reader: B) -> Self {
-        Self {
-            source_lines: reader.byte_lines().fuse(),
-            lines_read: 0,
-            start_of_content_line: 0,
-            waiting: None,
-        }
-    }
-}
-
-impl<B: io::BufRead> FusedIterator for Unfolded<B> {}
-impl<B: io::BufRead> Iterator for Unfolded<B> {
-    type Item = Result<(usize, BString), io::Error>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        // Here we prime the pump, setting `content_line` to `self.waiting` if available,
-        // or reading a fresh `content_line` if not.
-        let mut content_line = match self.waiting.take() {
-            Some(start_of_line) => start_of_line,
-            None => match self.source_lines.next() {
-                None => return None,
-                Some(Err(e)) => return Some(Err(e)),
-                Some(Ok(start_of_line)) => {
-                    self.lines_read += 1;
-                    start_of_line.into()
-                }
-            },
+/// Reads content lines into `buf`, unfolding long lines as described in
+/// [RFC 5545 Section 3.1](https://datatracker.ietf.org/doc/html/rfc5545#section-3.1), except that
+/// we accept either CRLF (`b"\r\n"`) or a bare `b'\n'` as a line ending. In either case, when the
+/// `b'\n'` is followed by a space (`b' '`) or a tab (`b'\t'`), the line ending and the space or tab
+/// are dropped.
+///
+/// We don't return the line ending.
+pub fn read_content_line_u8<R: io::BufRead + ?Sized>(
+    r: &mut R,
+    buf: &mut Vec<u8>,
+) -> Result<usize, io::Error> {
+    // Adapted from the rust standard library's `read_until` in `io/mod.rs`
+    macro_rules! fill_buf_to {
+        ($a:ident) => {
+            let $a = match r.fill_buf() {
+                Ok(n) => n,
+                Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            };
         };
-        self.start_of_content_line = self.lines_read;
-
-        // At this point we know:
-        // * `content_line` is the source line with number `self.lines_read`
-        // * `self.start_of_content_line == self.lines_read`
-        //
-        // The following loop adds source lines that start with a space or tab
-        // to `content_line`, returning `content_line` when that's no longer
-        // possible.
-        loop {
-            self.lines_read += 1;
-            match self.source_lines.next() {
-                None => return Some(Ok((self.start_of_content_line, content_line))),
-                Some(Err(e)) => return Some(Err(e)),
-                Some(Ok(next_part)) => match next_part.first() {
-                    Some(b' ' | b'\t') => content_line.extend(&next_part[1..]),
-                    _ => {
-                        self.waiting = Some(next_part.into());
-                        return Some(Ok((self.start_of_content_line, content_line)));
+    }
+    let mut lines_read = 0;
+    let mut nonline_read = 0;
+    loop {
+        let (mut saw_newline, consumed) = {
+            fill_buf_to!(available);
+            //if available.len() == 0 { return Ok(lines_read)}
+            match memchr(b'\n', available) {
+                Some(newline) => {
+                    lines_read += 1;
+                    buf.extend_from_slice(&available[..newline]);
+                    if buf.last() == Some(&b'\r') {
+                        buf.pop();
                     }
-                },
+                    (true, newline + 1)
+                }
+                None => {
+                    if !available.is_empty() {
+                        nonline_read = 1;
+                    }
+                    buf.extend_from_slice(available);
+                    (false, available.len())
+                }
+            }
+        };
+        r.consume(consumed);
+        if saw_newline {
+            fill_buf_to!(available);
+            if !available.is_empty() && (available[0] == b'\t' || available[0] == b' ') {
+                r.consume(1);
+                saw_newline = false;
             }
         }
+        if saw_newline {
+            return Ok(lines_read);
+        } else if consumed == 0 {
+            return Ok(lines_read + nonline_read);
+            // return Ok(if lines_read == 0 { 0 } else { lines_read + 1 });
+        }
     }
 }
 
+#[derive(Error, Debug)]
+pub enum CalendarError {
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    #[error(transparent)]
+    Utf8(#[from] std::string::FromUtf8Error),
+}
+#[derive(Debug)]
+pub struct ContentLines<R> {
+    lines_read: usize,
+    r: R,
+}
+pub trait BufReadContent: io::BufRead {
+    fn content_lines(self) -> ContentLines<Self>
+    where
+        Self: Sized,
+    {
+        ContentLines { lines_read: 1, r: self }
+    }
+}
+impl<R: io::BufRead> BufReadContent for R {}
+
+impl<R: io::BufRead> Iterator for ContentLines<R> {
+    type Item = Result<(usize, String), CalendarError>;
+
+    fn next(&mut self) -> Option<Result<(usize, String), CalendarError>> {
+        let mut buf = vec![];
+        match read_content_line_u8(&mut self.r, &mut buf) {
+            Err(e) => Some(Err(e.into())),
+            Ok(0) => None,
+            Ok(n) => match String::from_utf8(buf) {
+                Ok(s) => {
+                    let start_of_content_line = self.lines_read;
+                    self.lines_read += n;
+                    Some(Ok((start_of_content_line, s)))
+                }
+                Err(e) => Some(Err(e.into())),
+            },
+        }
+    }
+}
 #[cfg(test)]
 mod test {
     use super::*;
-    use bstr::B;
-    //use pretty_assertions::assert_eq;
+    use bstr::ByteSlice;
+    use pretty_assertions::assert_eq;
 
-    #[test]
-    fn empty_string() {
-        let input = B("");
-        let cursor = io::Cursor::new(input);
-        let result: Vec<_> = Unfolded::lines(cursor).map(Result::unwrap).collect();
-        assert_eq!(result, vec![]);
+    fn content_lines(input: &str) -> Vec<(usize, String)> {
+        let result: Vec<_> =
+            io::Cursor::new(input.as_bytes()).content_lines().map(Result::unwrap).collect();
+        result
     }
     #[test]
-    fn already_unfolded() {
-        let input = B("foo\r\nbar\r\n");
-        let cursor = io::Cursor::new(input);
-        let result: Vec<_> = Unfolded::lines(cursor).map(Result::unwrap).collect();
-        let expected = vec![(1, B("foo").into()), (2, B("bar").into())];
-        assert_eq!(result, expected);
+    fn empty() {
+        assert!(content_lines("").is_empty());
+
+        let input = b"";
+        let mut cursor = io::Cursor::new(input);
+        let mut buf = Vec::new();
+        let lines = read_content_line_u8(&mut cursor, &mut buf).unwrap();
+        assert_eq!(buf.as_bstr(), input.as_bstr());
+        assert_eq!(lines, 0);
     }
     #[test]
-    fn folded() {
-        let input = B("OF\r\n F\r\nb\r\n\tar\r\n");
-        let cursor = io::Cursor::new(input);
-        let result: Vec<_> = Unfolded::lines(cursor).map(Result::unwrap).collect();
-        let expected: Vec<_> = vec![(1, B("OFF").into()), (3, B("bar").into())];
-        assert_eq!(result, expected);
+    fn no_newline() {
+        let input = "Without newline";
+        assert_eq!(content_lines(input), vec![(1, input.to_string())]);
+
+        let mut cursor = io::Cursor::new(input.as_bytes());
+        let mut buf = Vec::new();
+        let lines = read_content_line_u8(&mut cursor, &mut buf).unwrap();
+        assert_eq!(buf.as_bstr(), input);
+        assert_eq!(lines, 1);
+    }
+    #[test]
+    fn one_newline() {
+        let input = "One newline\r\n";
+        let bare = "One newline";
+        assert_eq!(content_lines(input), vec![(1, bare.to_string())]);
+
+        let mut cursor = io::Cursor::new(input.as_bytes());
+        let mut buf = Vec::new();
+        let lines = read_content_line_u8(&mut cursor, &mut buf).unwrap();
+        assert_eq!(buf.as_bstr(), bare);
+        assert_eq!(lines, 1);
+    }
+    #[test]
+    fn joined_line() {
+        let input = "With newlin\r\n e and without";
+        let joined = "With newline and without";
+        assert_eq!(content_lines(input), vec![(1, joined.to_string())]);
+
+        let mut cursor = io::Cursor::new(input.as_bytes());
+        let mut buf = Vec::new();
+        let lines = read_content_line_u8(&mut cursor, &mut buf).unwrap();
+        assert_eq!(buf.as_bstr(), joined);
+        assert_eq!(lines, 2);
+    }
+    #[test]
+    fn joined_line_small_buffer() {
+        let a = b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".repeat(5000);
+        let b = b"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".repeat(5000);
+        let c = b"cccccccccccccccccccccccccccccccc".repeat(5000);
+        let mut input = a.clone();
+        let mut joined = input.clone();
+        input.extend_from_slice(b"\r\n ");
+        input.extend_from_slice(&b);
+        joined.extend_from_slice(&b);
+        input.extend_from_slice(b"\n ");
+        input.extend_from_slice(&c);
+        joined.extend_from_slice(&c);
+        let mut reader = io::BufReader::with_capacity(1, io::Cursor::new(&input));
+        let mut buf = Vec::new();
+        let mut lines = read_content_line_u8(&mut reader, &mut buf).unwrap();
+        assert_eq!(buf.as_bstr(), joined.as_bstr());
+        assert_eq!(lines, 3);
+
+        input.extend(b"\r\n");
+        reader = io::BufReader::with_capacity(1, io::Cursor::new(&input));
+        buf = Vec::new();
+        lines = read_content_line_u8(&mut reader, &mut buf).unwrap();
+        assert_eq!(buf.as_bstr(), joined.as_bstr());
+        assert_eq!(lines, 3);
+
+        input.extend(b"\r\n");
+        reader = io::BufReader::with_capacity(1, io::Cursor::new(&input));
+        buf.clear();
+        lines = read_content_line_u8(&mut reader, &mut buf).unwrap();
+        assert_eq!(buf.as_bstr(), joined.as_bstr());
+        assert_eq!(lines, 3);
+
+        buf.clear();
+        lines = read_content_line_u8(&mut reader, &mut buf).unwrap();
+        assert_eq!(buf.as_bstr(), b"".as_bstr());
+        assert_eq!(lines, 1);
+    }
+    #[test]
+    fn two_content_lines() {
+        let first = "With newline";
+        let second = "and without";
+        let mut input = [first, second].join("\n");
+        assert_eq!(content_lines(&input), vec![(1, first.to_string()), (2, second.to_string())]);
+
+        input.push_str("\r\n");
+        assert_eq!(content_lines(&input), vec![(1, first.to_string()), (2, second.to_string())]);
+
+        let mut reader = io::BufReader::new(io::Cursor::new(input.as_bytes()));
+        let mut buf = Vec::new();
+        let lines = read_content_line_u8(&mut reader, &mut buf).unwrap();
+        assert_eq!(lines, 1);
+        assert_eq!(buf.as_bstr(), first);
+        buf.clear();
+        let lines = read_content_line_u8(&mut reader, &mut buf).unwrap();
+        assert_eq!(lines, 1);
+        assert_eq!(buf.as_bstr(), second);
     }
 }
