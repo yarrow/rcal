@@ -304,10 +304,7 @@ xmacro! {
             }
         }
     }
-    fn param_ids() -> NameIds {
-        const NAMES: [&'static str; $#tag] = [${ $tag, }];
-        NameIds::known_ids(NAMES)
-    }
+    pub(crate) const NAMES: [&'static str; $#tag] = [${ $tag, }];
 }
 #[cfg(test)]
 mod test {
@@ -337,15 +334,23 @@ mod test {
         assert_eq!(Vec::from(PARAMETER_IDS), expected);
     }
     #[test]
+    fn calculated_names_and_listed_names_agree() {
+        assert_eq!(NAMES, PARAMETER_NAMES);
+    }
+    #[test]
     fn parameter_names_are_sorted() {
         let mut sorted = PARAMETER_NAMES;
         sorted.sort_unstable();
+        assert_eq!(NAMES, sorted);
     }
     #[test]
     fn parameter_names_correspond_to_parameter_ids() {
-        let mut ids = param_ids();
-        let names_from_ids: Vec<_> =
-            PARAMETER_IDS.into_iter().map(|id| ids.name(id).unwrap().to_string()).collect();
+        use crate::names::{Lookup, ParameterId};
+        let lookup = Lookup::new();
+        let names_from_ids: Vec<_> = PARAMETER_IDS
+            .into_iter()
+            .map(|id| lookup.parameter_name(ParameterId(id)).unwrap().to_string())
+            .collect();
         assert_eq!(names_from_ids, Vec::from(PARAMETER_NAMES));
     }
 }

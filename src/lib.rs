@@ -10,4 +10,5 @@ pub use jiff::civil::Weekday;
 pub mod error;
 pub mod names;
 pub mod parameters;
+pub mod properties;
 pub mod unfolded;
