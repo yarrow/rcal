@@ -1,6 +1,6 @@
+use crate::error::CalendarError;
 use memchr::memchr;
 use std::io::{self, ErrorKind};
-use thiserror::Error;
 
 /// Reads content lines into `buf`, unfolding long lines as described in
 /// [RFC 5545 Section 3.1](https://datatracker.ietf.org/doc/html/rfc5545#section-3.1), except that
@@ -64,13 +64,6 @@ pub fn read_content_line_u8<R: io::BufRead + ?Sized>(
     }
 }
 
-#[derive(Error, Debug)]
-pub enum CalendarError {
-    #[error(transparent)]
-    Io(#[from] io::Error),
-    #[error(transparent)]
-    Utf8(#[from] std::string::FromUtf8Error),
-}
 #[derive(Debug)]
 pub struct ContentLines<R> {
     lines_read: usize,

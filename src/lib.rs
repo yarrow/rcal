@@ -7,5 +7,7 @@ pub mod rrule;
 pub mod rrule_error;
 pub mod values;
 pub use jiff::civil::Weekday;
+pub mod error;
+pub mod names;
 pub mod parameters;
 pub mod unfolded;

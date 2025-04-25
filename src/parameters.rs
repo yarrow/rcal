@@ -1,8 +1,6 @@
-use indexmap::IndexSet;
+use crate::names::NameIds;
 pub use jiff::SignedDuration;
 use litemap::LiteMap;
-use rustc_hash::FxBuildHasher;
-use std::borrow::Cow;
 use std::num::NonZeroUsize;
 use xmacro::xmacro;
 
@@ -306,33 +304,9 @@ xmacro! {
             }
         }
     }
-    type Key = Cow<'static, str>;
-    type NameSet = IndexSet<Key, FxBuildHasher>;
-    pub struct ParamIds(NameSet);
-    impl ParamIds {
-        #[must_use]
-        pub fn initial_ids() -> Self {
-            let names = vec![${ $tag, }];
-            let mut set = NameSet::with_capacity_and_hasher(names.len(), FxBuildHasher);
-            for name in names {
-                set.insert(Cow::Borrowed(name));
-            }
-            ParamIds(set)
-        }
-        #[must_use]
-        pub fn id(&mut self, name: &str) -> usize {
-            if let Some((id_found, _)) = self.0.get_full(name) {
-                id_found
-            } else {
-                let key = Cow::from(name.to_string());
-                let (id_new, _) = self.0.insert_full(key);
-                id_new
-            }
-        }
-        #[must_use]
-        pub fn name(&mut self, id: usize) -> Option<&Key> {
-            self.0.get_index(id)
-        }
+    fn param_ids() -> NameIds {
+        const NAMES: [&'static str; $#tag] = [${ $tag, }];
+        NameIds::known_ids(NAMES)
     }
 }
 #[cfg(test)]
@@ -369,7 +343,7 @@ mod test {
     }
     #[test]
     fn parameter_names_correspond_to_parameter_ids() {
-        let mut ids = ParamIds::initial_ids();
+        let mut ids = param_ids();
         let names_from_ids: Vec<_> =
             PARAMETER_IDS.into_iter().map(|id| ids.name(id).unwrap().to_string()).collect();
         assert_eq!(names_from_ids, Vec::from(PARAMETER_NAMES));
