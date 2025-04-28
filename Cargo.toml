@@ -54,6 +54,3 @@ single_match_else = "allow"
 codegenrs = { version = "3.0.2", default-features = false }
 pretty_assertions = "1.4.1"
 snapbox = "0.6.21"
-
-[build-dependencies]
-heck = "0.5.0"

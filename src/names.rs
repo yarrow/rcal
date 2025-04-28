@@ -5,44 +5,50 @@ use std::borrow::Cow;
 
 /// `Lookup` is a string interner for parameter and property names. It starts out
 #[derive(Default, Debug)]
+#[allow(dead_code)] // for now!
 pub struct Lookup {
     parms: NameIds,
     props: NameIds,
 }
 impl Lookup {
+    #[must_use]
     pub fn new() -> Self {
         Lookup {
-            parms: NameIds::known_ids(crate::parameters::NAMES),
-            props: NameIds::known_ids(crate::properties::NAMES),
+            parms: NameIds::known_ids(crate::parameter::NAMES),
+            props: NameIds::known_ids(crate::property::NAMES),
         }
     }
     #[inline]
     pub fn known_parameter(&mut self, name: &'static str) -> NameResult<ParameterId> {
-        self.parms.known_id(name).map(|u| ParameterId(u))
+        self.parms.known_id(name).map(ParameterId)
     }
     #[inline]
     pub fn parameter_id(&mut self, name: &str) -> NameResult<ParameterId> {
-        self.parms.id(name).map(|u| ParameterId(u))
+        self.parms.id(name).map(ParameterId)
     }
     #[inline]
+    #[must_use]
     pub fn parameter_name(&self, id: ParameterId) -> Option<&Key> {
         self.parms.name(id.0)
     }
     #[inline]
     pub fn known_property(&mut self, name: &'static str) -> NameResult<PropertyId> {
-        self.parms.known_id(name).map(|u| PropertyId(u))
+        self.parms.known_id(name).map(PropertyId)
     }
     #[inline]
     pub fn property_id(&mut self, name: &str) -> NameResult<PropertyId> {
-        self.parms.id(name).map(|u| PropertyId(u))
+        self.parms.id(name).map(PropertyId)
     }
     #[inline]
+    #[must_use]
     pub fn property_name(&self, id: PropertyId) -> Option<&Key> {
         self.parms.name(id.0)
     }
 }
 pub type NameResult<T> = Result<T, ParseError>;
+#[derive(Debug, Clone, Copy)]
 pub struct ParameterId(pub(crate) usize);
+#[derive(Debug, Clone, Copy)]
 pub struct PropertyId(pub(crate) usize);
 
 type Key = Cow<'static, str>;

@@ -1,165 +1,40 @@
-use crate::names::NameIds;
-pub use jiff::SignedDuration;
 use litemap::LiteMap;
 use std::num::NonZeroUsize;
 use xmacro::xmacro;
 
-#[derive(Clone, Copy, Debug)]
-pub struct Base64();
+#[allow(clippy::wildcard_imports)]
+use super::values::*;
 
-#[derive(Clone, Debug)]
-pub enum CUType {
-    Individual,
-    Group,
-    Resource,
-    Room,
-    Unknown(Option<String>),
-}
-
-#[derive(Clone, Debug)]
-pub enum Display {
-    Badge(Option<String>),
-    Graphic,
-    Fullsize,
-    Thumbnail,
-}
-
-#[derive(Clone, Debug)]
-pub enum FBType {
-    Free,
-    Busy(Option<String>),
-    BusyUnavailable,
-    BusyTentative,
-}
-
-#[derive(Clone, Debug)]
-pub enum Feature {
-    Audio,
-    Chat,
-    Feed,
-    Moderator,
-    Phone,
-    Screen,
-    Video,
-    Other(String),
-}
-
-#[derive(Clone, Debug)]
-pub enum PartStat {
-    NeedsAction(Option<String>),
-    Accepted,
-    Declined,
-    Tentative,
-    Delegated,
-    Completed,
-    InProcess,
-}
-#[derive(Clone, Copy, Debug)]
-pub enum Related {
-    Start,
-    End,
-}
-
-#[derive(Clone, Debug)]
-pub enum RelType {
-    Parent(Option<String>),
-    Child,
-    Sibling,
-}
-
-#[derive(Clone, Debug)]
-pub enum Role {
-    Chair,
-    ReqParticipant(Option<String>),
-    OptParticipant,
-    NonParticipant,
-}
-
-#[derive(Clone, Debug)]
-pub enum ScheduleAgent {
-    Server,
-    Client,
-    None(Option<String>),
-}
-
-#[derive(Clone, Debug)]
-pub enum ScheduleForceSend {
-    Request,
-    Reply,
-    Unknown(Option<String>),
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct ThisAndFuture();
-
-#[derive(Clone, Debug)]
-pub struct UriString(String);
-impl UriString {
-    #[must_use]
-    pub fn into_string(self) -> String {
-        self.0
-    }
-    #[must_use]
-    pub fn new(s: String) -> Self {
-        Self(s)
-    }
-}
-
-#[derive(Clone, Debug)]
-pub enum Value {
-    Binary,
-    Boolean,
-    CalAddress,
-    Date,
-    DateTime,
-    Duration,
-    Float,
-    Integer,
-    Period,
-    Recur,
-    Text,
-    Time,
-    Uid,
-    Uri,
-    UtcOffset,
-    XmlReference,
-    Other(String),
-}
-
-pub type ParamText = String; // FIXME: this type can't contain CONTROL, DQUOTE, ";", ":", ","
-pub type FmtType = String; // FIXME: must be a media type the media type [RFC4288]
-pub type Language = String; // FIXME: must be as defined in [RFC5646].
-pub type ScheduleStatus = Vec<String>; // FIXME: must be at least one dot-separated pair or triplet of integers, like "3.1" or "3.1.1"
-pub type CalAddress = String; // FIXME: must be mailto: uri
 #[derive(Clone, Debug)]
 pub enum ParameterValue {
-    Boolean(bool),
+    Boolean(bool), // Copy
     CUType(CUType),
     Display(Display),
-    Duration(SignedDuration),
-    Encoding(Option<Base64>),
+    Duration(SignedDuration), // Copy
+    Encoding(Option<Base64>), // Copy
     FBType(FBType),
     Feature(Feature),
     FmtType(FmtType),
     Language(Language),
-    Order(NonZeroUsize),
+    Order(NonZeroUsize), // Copy
     ParamText(ParamText),
     PartStat(PartStat),
-    Range(Option<ThisAndFuture>),
+    Range(Option<ThisAndFuture>), // Copy
     RelType(RelType),
-    Related(Related),
+    Related(Related), // Copy
     Role(Role),
     ScheduleAgent(ScheduleAgent),
     ScheduleForceSend(ScheduleForceSend),
     ScheduleStatus(ScheduleStatus),
     SentBy(CalAddress),
-    Size(u64),
+    Size(u64), // Copy
     Text(String),
     Tzid(String),
     Uri(UriString),
     UriList(Vec<UriString>),
     Value(Value),
 }
+#[derive(Debug, Default, Clone)]
 pub struct Parameters(LiteMap<usize, ParameterValue>);
 
 xmacro! {
@@ -352,5 +227,13 @@ mod test {
             .map(|id| lookup.parameter_name(ParameterId(id)).unwrap().to_string())
             .collect();
         assert_eq!(names_from_ids, Vec::from(PARAMETER_NAMES));
+    }
+    #[test]
+    fn test_altrep() {
+        let yada = "yadayada";
+        let mut parms = Parameters::default();
+        parms.set_altrep(yada.to_string());
+        let result = parms.altrep().unwrap();
+        assert_eq!(result, yada);
     }
 }
