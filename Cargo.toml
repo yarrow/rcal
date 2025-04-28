@@ -10,7 +10,7 @@ keywords = ["RFC5545", "recurrence-rule", "rrule", "iCal", "iCalendar", "jiff"]
 categories = ["date-and-time", "parser-implementations"]
 
 [lib]
-name = "ical_jiff"
+name = "rcal"
 path = "src/lib.rs"
 
 [dependencies]
@@ -51,4 +51,9 @@ redundant_closure_for_method_calls = "allow"
 single_match_else = "allow"
 
 [dev-dependencies]
+codegenrs = { version = "3.0.2", default-features = false }
 pretty_assertions = "1.4.1"
+snapbox = "0.6.21"
+
+[build-dependencies]
+heck = "0.5.0"
