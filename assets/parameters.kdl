@@ -1,0 +1,72 @@
+parameters {
+    - RFC=5545 Section="3.2.1" method=altrep variant=Uri
+    - RFC=5545 Section="3.2.2" method=cn variant=Text
+    - RFC=5545 Section="3.2.3" method=cutype variant=CUType
+    - RFC=5545 Section="3.2.4" method=delegated_from variant=UriList
+    - RFC=5545 Section="3.2.5" method=delegated_to variant=UriList
+    - RFC=9073 Section="5.3" method=derived variant=Boolean
+    - RFC=5545 Section="3.2.6" method=dir variant=Uri
+    - RFC=7986 Section="6.1" method=display variant=Display
+    - RFC=7986 Section="6.2" method=email variant=Text
+    - RFC=5545 Section="3.2.7" method=encoding variant=Encoding doc="""
+        RFC 5545 gives values of `8BIT` or `BASE64` but the effect of an `8BIT` value
+        is the same as having no `ENCODING` parameterso we use the single-valued
+        `Base64` type.
+        """
+    - RFC=5545 Section="3.2.9" method=fbtype variant=FBType
+    - RFC=7986 Section="6.3" method=feature variant=Feature
+    - RFC=8607 Section="4.2" method=filename variant=ParamText
+    - RFC=5545 Section="3.2.8" method=fmttype variant=FmtType
+    - RFC=9253 Section="6.2" method=gap variant=Duration
+    - RFC=7986 Section="6.4" method=label variant=Text
+    - RFC=5545 Section="3.2.10" method=language variant=Language
+    - RFC=9253 Section="6.1" method=linkrel variant=Uri
+    - RFC=8607 Section="4.3" method=managed_id variant=ParamText
+    - RFC=5545 Section="3.2.11" method=member variant=UriList
+    - RFC=9073 Section="5.1" method=order variant=Order
+    - RFC=5545 Section="3.2.12" method=partstat variant=PartStat
+    - RFC=5545 Section="3.2.13" method=range variant=Range doc="""
+        RFC 5545 says the only valid value for `RANGE` is `THISANDFUTURE`,
+        so we have another single-valued type
+        """
+    - RFC=5545 Section="3.2.14" method=related variant=Related
+    - RFC=5545 Section="3.2.15" method=reltype variant=Related
+    - RFC=5545 Section="3.2.16" method=role variant=Role
+    - RFC=5545 Section="3.2.17" method=rsvp variant=Boolean
+    - RFC=6638 Section="7.1" method=schedule_agent variant=ScheduleAgent
+    - RFC=6638 Section="7.2" method=schedule_force_send variant=ScheduleForceSend
+    - RFC=6638 Section="7.3" method=schedule_status variant=ScheduleStatus
+    - RFC=9073 Section="5.2" method=schema variant=Uri
+    - RFC=5545 Section="3.2.18" method=sent_by variant=SentBy
+    - RFC=8607 Section="4.1" method=size variant=Size
+    - RFC=5545 Section="3.2.19" method=tzid variant=Tzid
+    - RFC=5545 Section="3.2.20" method=value variant=Value
+}
+types {
+    - variant=Boolean type=bool copy=#true
+    - variant=CUType type=CUType 
+    - variant=Display type=Display 
+    - variant=Duration type=SignedDuration copy=#true
+    - variant=Encoding type=Option<Base64> copy=#true
+    - variant=FBType type=FBType 
+    - variant=Feature type=Feature 
+    - variant=FmtType type=FmtType 
+    - variant=Language type=Language 
+    - variant=Order type=NonZeroUsize copy=#true
+    - variant=ParamText type=ParamText 
+    - variant=PartStat type=PartStat 
+    - variant=Range type=Option<ThisAndFuture> copy=#true
+    - variant=RelType type=RelType 
+    - variant=Related type=Related copy=#true
+    - variant=Role type=Role 
+    - variant=ScheduleAgent type=ScheduleAgent 
+    - variant=ScheduleForceSend type=ScheduleForceSend 
+    - variant=ScheduleStatus type=ScheduleStatus 
+    - variant=SentBy type=CalAddress 
+    - variant=Size type=u64 copy=#true
+    - variant=Text type=String 
+    - variant=Tzid type=String 
+    - variant=Uri type=UriString 
+    - variant=UriList type=Vec<UriString> 
+    - variant=Value type=Value 
+}
