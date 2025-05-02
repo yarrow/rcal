@@ -1,4 +1,4 @@
-use crate::error::{ParseError, err};
+use crate::{ParseError, ParseResult, err};
 use indexmap::IndexSet;
 use rustc_hash::FxBuildHasher;
 use std::borrow::Cow;
@@ -19,11 +19,11 @@ impl Lookup {
         }
     }
     #[inline]
-    pub fn known_parameter(&mut self, name: &'static str) -> NameResult<ParameterId> {
+    pub fn known_parameter(&mut self, name: &'static str) -> ParseResult<ParameterId> {
         self.parms.known_id(name).map(ParameterId)
     }
     #[inline]
-    pub fn parameter_id(&mut self, name: &str) -> NameResult<ParameterId> {
+    pub fn parameter_id(&mut self, name: &str) -> ParseResult<ParameterId> {
         self.parms.id(name).map(ParameterId)
     }
     #[inline]
@@ -32,11 +32,11 @@ impl Lookup {
         self.parms.name(id.0)
     }
     #[inline]
-    pub fn known_property(&mut self, name: &'static str) -> NameResult<PropertyId> {
+    pub fn known_property(&mut self, name: &'static str) -> ParseResult<PropertyId> {
         self.parms.known_id(name).map(PropertyId)
     }
     #[inline]
-    pub fn property_id(&mut self, name: &str) -> NameResult<PropertyId> {
+    pub fn property_id(&mut self, name: &str) -> ParseResult<PropertyId> {
         self.parms.id(name).map(PropertyId)
     }
     #[inline]
@@ -45,7 +45,6 @@ impl Lookup {
         self.parms.name(id.0)
     }
 }
-pub type NameResult<T> = Result<T, ParseError>;
 #[derive(Debug, Clone, Copy)]
 pub struct ParameterId(pub(crate) usize);
 #[derive(Debug, Clone, Copy)]

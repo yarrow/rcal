@@ -3,7 +3,7 @@ use memchr::memchr;
 use std::io::{self, ErrorKind};
 
 /// Reads content lines into `buf`, unfolding long lines as described in
-/// [RFC 5545 Section 3.1](https://datatracker.ietf.org/doc/html/rfc5545#section-3.1), except that
+/// [RFC 5545 § 3.1](https://datatracker.ietf.org/doc/html/rfc5545#section-3.1), except that
 /// we accept either CRLF (`b"\r\n"`) or a bare `b'\n'` as a line ending. In either case, when the
 /// `b'\n'` is followed by a space (`b' '`) or a tab (`b'\t'`), the line ending and the space or tab
 /// are dropped.

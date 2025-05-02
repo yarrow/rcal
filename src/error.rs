@@ -10,6 +10,8 @@ pub enum CalendarError {
     AtLine(usize, ParseError),
 }
 
+pub type ParseResult<T> = Result<T, ParseError>;
+
 #[derive(Error, Debug)]
 #[error("{0}")]
 pub struct ParseError(pub String);
