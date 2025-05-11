@@ -7,6 +7,7 @@ const KDL: &str = include_str!("../assets/parameters.kdl");
 const TEMPLATE: &str = include_str!("../assets/parameter_template.rs");
 
 #[test]
+#[cfg_attr(miri, ignore)] // Takes too long, and if we die generating code it will be obvious
 fn codegen() {
     let mut content: Vec<u8> = vec![];
     generate(&mut content).unwrap();

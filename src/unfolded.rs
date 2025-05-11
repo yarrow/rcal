@@ -156,6 +156,7 @@ mod test {
         assert_eq!(lines, 2);
     }
     #[test]
+    #[cfg_attr(miri, ignore)] // Takes too long
     fn joined_line_small_buffer() {
         let a = b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".repeat(5000);
         let b = b"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".repeat(5000);

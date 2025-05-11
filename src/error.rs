@@ -24,3 +24,11 @@ macro_rules! err {
     };
 }
 pub(crate) use err;
+
+#[derive(Error, Debug, PartialEq)]
+#[error("{reason} at column {valid_up_to}")]
+pub struct PreparseError {
+    pub(crate) reason: &'static str,
+    pub(crate) valid_up_to: usize,
+    pub(crate) error_len: Option<u8>,
+}

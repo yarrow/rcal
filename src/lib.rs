@@ -12,4 +12,5 @@ pub mod error;
 pub(crate) use error::{ParseError, ParseResult, err};
 pub mod names;
 pub mod parameter;
+pub mod preparse;
 pub mod unfolded;
