@@ -238,84 +238,90 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
                 }
             }
             State::NonAscii => {
-                // Taken from `run_utf8_validation` in
-                // lib/rustlib/src/rust/library/core/src/str/validations.rs
-                let old_offset = index;
-                macro_rules! next {
-                    () => {{
-                        index += 1;
-                        // we needed data, but there was none: error!
-                        if index >= len {
-                            utf8_err!(None)
-                        }
-                        v[index]
-                    }};
-                }
-                macro_rules! utf8_err {
-                    ($error_len: expr) => {
-                        return Err(PreparseError {
-                            reason: UTF8_ERROR,
-                            valid_up_to: old_offset,
-                            error_len: $error_len,
-                        })
-                    };
-                }
+                loop {
+                    state = old_state; // Return from whence we came at the end of the loop
 
-                let w = utf8_char_width(this_byte);
-                // 2-byte encoding is for codepoints  \u{0080} to  \u{07ff}
-                //        first  C2 80        last DF BF
-                // 3-byte encoding is for codepoints  \u{0800} to  \u{ffff}
-                //        first  E0 A0 80     last EF BF BF
-                //   excluding surrogates codepoints  \u{d800} to  \u{dfff}
-                //               ED A0 80 to       ED BF BF
-                // 4-byte encoding is for codepoints \u{10000} to \u{10ffff}
-                //        first  F0 90 80 80  last F4 8F BF BF
-                //
-                // Use the UTF-8 syntax from the RFC
-                //
-                // https://tools.ietf.org/html/rfc3629
-                // UTF8-1      = %x00-7F
-                // UTF8-2      = %xC2-DF UTF8-tail
-                // UTF8-3      = %xE0 %xA0-BF UTF8-tail / %xE1-EC 2( UTF8-tail ) /
-                //               %xED %x80-9F UTF8-tail / %xEE-EF 2( UTF8-tail )
-                // UTF8-4      = %xF0 %x90-BF 2( UTF8-tail ) / %xF1-F3 3( UTF8-tail ) /
-                //               %xF4 %x80-8F 2( UTF8-tail )
-                match w {
-                    2 => {
-                        if next!() as i8 >= -64 {
-                            utf8_err!(Some(1))
-                        }
+                    // Taken from `run_utf8_validation` in
+                    // lib/rustlib/src/rust/library/core/src/str/validations.rs
+                    let old_offset = index;
+                    macro_rules! next {
+                        () => {{
+                            index += 1;
+                            // we needed data, but there was none: error!
+                            if index >= len {
+                                utf8_err!(None)
+                            }
+                            v[index]
+                        }};
                     }
-                    3 => {
-                        match (this_byte, next!()) {
-                            (0xE0, 0xA0..=0xBF)
-                            | (0xE1..=0xEC, 0x80..=0xBF)
-                            | (0xED, 0x80..=0x9F)
-                            | (0xEE..=0xEF, 0x80..=0xBF) => {}
-                            _ => utf8_err!(Some(1)),
-                        }
-                        if next!() as i8 >= -64 {
-                            utf8_err!(Some(2))
-                        }
+                    macro_rules! utf8_err {
+                        ($error_len: expr) => {
+                            return Err(PreparseError {
+                                reason: UTF8_ERROR,
+                                valid_up_to: old_offset,
+                                error_len: $error_len,
+                            })
+                        };
                     }
-                    4 => {
-                        match (this_byte, next!()) {
-                            (0xF0, 0x90..=0xBF)
-                            | (0xF1..=0xF3, 0x80..=0xBF)
-                            | (0xF4, 0x80..=0x8F) => {}
-                            _ => utf8_err!(Some(1)),
+
+                    let w = utf8_char_width(this_byte);
+                    // 2-byte encoding is for codepoints  \u{0080} to  \u{07ff}
+                    //        first  C2 80        last DF BF
+                    // 3-byte encoding is for codepoints  \u{0800} to  \u{ffff}
+                    //        first  E0 A0 80     last EF BF BF
+                    //   excluding surrogates codepoints  \u{d800} to  \u{dfff}
+                    //               ED A0 80 to       ED BF BF
+                    // 4-byte encoding is for codepoints \u{10000} to \u{10ffff}
+                    //        first  F0 90 80 80  last F4 8F BF BF
+                    //
+                    // Use the UTF-8 syntax from the RFC
+                    //
+                    // https://tools.ietf.org/html/rfc3629
+                    // UTF8-1      = %x00-7F
+                    // UTF8-2      = %xC2-DF UTF8-tail
+                    // UTF8-3      = %xE0 %xA0-BF UTF8-tail / %xE1-EC 2( UTF8-tail ) /
+                    //               %xED %x80-9F UTF8-tail / %xEE-EF 2( UTF8-tail )
+                    // UTF8-4      = %xF0 %x90-BF 2( UTF8-tail ) / %xF1-F3 3( UTF8-tail ) /
+                    //               %xF4 %x80-8F 2( UTF8-tail )
+                    match w {
+                        2 => {
+                            if next!() as i8 >= -64 {
+                                utf8_err!(Some(1))
+                            }
                         }
-                        if next!() as i8 >= -64 {
-                            utf8_err!(Some(2))
+                        3 => {
+                            match (this_byte, next!()) {
+                                (0xE0, 0xA0..=0xBF)
+                                | (0xE1..=0xEC, 0x80..=0xBF)
+                                | (0xED, 0x80..=0x9F)
+                                | (0xEE..=0xEF, 0x80..=0xBF) => {}
+                                _ => utf8_err!(Some(1)),
+                            }
+                            if next!() as i8 >= -64 {
+                                utf8_err!(Some(2))
+                            }
                         }
-                        if next!() as i8 >= -64 {
-                            utf8_err!(Some(3))
+                        4 => {
+                            match (this_byte, next!()) {
+                                (0xF0, 0x90..=0xBF)
+                                | (0xF1..=0xF3, 0x80..=0xBF)
+                                | (0xF4, 0x80..=0x8F) => {}
+                                _ => utf8_err!(Some(1)),
+                            }
+                            if next!() as i8 >= -64 {
+                                utf8_err!(Some(2))
+                            }
+                            if next!() as i8 >= -64 {
+                                utf8_err!(Some(3))
+                            }
                         }
+                        _ => utf8_err!(Some(1)),
                     }
-                    _ => utf8_err!(Some(1)),
+                    next_byte_or_finish!();
+                    if this_byte < 128 {
+                        break;
+                    }
                 }
-                index += 1;
-                state = old_state;
             }
         }
     }
@@ -459,6 +465,18 @@ mod test {
             name: "FOO",
             value: "bex",
             parameters: vec![StrParam { name: "BAR", values: vec!["baz"] }],
+        };
+        let result = parse(text);
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn non_ascii() {
+        let text = "FOO;BAR=íííí:béééé";
+        let expected = StrProp {
+            name: "FOO",
+            value: "béééé",
+            parameters: vec![StrParam { name: "BAR", values: vec!["íííí"] }],
         };
         let result = parse(text);
         assert_eq!(result, expected);
