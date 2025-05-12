@@ -25,10 +25,15 @@ macro_rules! err {
 }
 pub(crate) use err;
 
-#[derive(Error, Debug, PartialEq)]
+#[derive(Clone, Debug, Error, PartialEq)]
 #[error("{reason} at column {valid_up_to}")]
 pub struct PreparseError {
     pub(crate) reason: &'static str,
     pub(crate) valid_up_to: usize,
-    pub(crate) error_len: Option<u8>,
+    pub(crate) error_len: Option<usize>,
+}
+impl PreparseError {
+    pub fn reason(&self) -> &'static str {
+        self.reason
+    }
 }

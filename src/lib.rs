@@ -13,4 +13,5 @@ pub(crate) use error::{ParseError, ParseResult, err};
 pub mod names;
 pub mod parameter;
 pub mod preparse;
+pub use preparse::with_regex;
 pub mod unfolded;

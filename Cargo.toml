@@ -54,6 +54,11 @@ single_match_else = "allow"
 [dev-dependencies]
 anyhow = "1.0.98"
 codegenrs = { version = "3.0.2", default-features = false }
+criterion = "0.5.1"
 kdl = "6.3.4"
 pretty_assertions = "1.4.1"
 snapbox = "0.6.21"
+
+[[bench]]
+name = "preparse"
+harness = false

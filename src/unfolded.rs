@@ -1,4 +1,5 @@
 use crate::error::CalendarError;
+use bstr::BString;
 use memchr::memchr;
 use std::io::{self, ErrorKind};
 
@@ -80,33 +81,35 @@ pub trait BufReadContent: io::BufRead {
 impl<R: io::BufRead> BufReadContent for R {}
 
 impl<R: io::BufRead> Iterator for ContentLines<R> {
-    type Item = Result<(usize, String), CalendarError>;
+    type Item = Result<(usize, BString), CalendarError>;
 
-    fn next(&mut self) -> Option<Result<(usize, String), CalendarError>> {
+    fn next(&mut self) -> Option<Result<(usize, BString), CalendarError>> {
         let mut buf = vec![];
         match read_content_line_u8(&mut self.r, &mut buf) {
             Err(e) => Some(Err(e.into())),
             Ok(0) => None,
-            Ok(n) => match String::from_utf8(buf) {
-                Ok(s) => {
-                    let start_of_content_line = self.lines_read;
-                    self.lines_read += n;
-                    Some(Ok((start_of_content_line, s)))
-                }
-                Err(e) => Some(Err(e.into())),
-            },
+            Ok(n) => {
+                let start_of_content_line = self.lines_read;
+                self.lines_read += n;
+                Some(Ok((start_of_content_line, buf.into())))
+            }
         }
     }
 }
 #[cfg(test)]
 mod test {
+    use std::str;
+
     use super::*;
     use bstr::ByteSlice;
     use pretty_assertions::assert_eq;
 
     fn content_lines(input: &str) -> Vec<(usize, String)> {
-        let result: Vec<_> =
-            io::Cursor::new(input.as_bytes()).content_lines().map(Result::unwrap).collect();
+        let result: Vec<_> = io::Cursor::new(input.as_bytes())
+            .content_lines()
+            .map(Result::unwrap)
+            .map(|(n, buf)| (n, str::from_utf8(buf.as_slice()).unwrap().to_string()))
+            .collect();
         result
     }
     #[test]
