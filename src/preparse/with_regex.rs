@@ -6,7 +6,7 @@ use super::{
     CONTROL_CHARACTER, EMPTY_CONTENT_LINE, NO_COLON_OR_SEMICOLON, NO_COMMA_ETC, NO_EQUAL_SIGN,
     NO_PARAM_NAME, NO_PROPERTY_NAME, NO_PROPERTY_VALUE, UNEXPECTED_DOUBLE_QUOTE, UTF8_ERROR,
 };
-use super::{LocStr, Param, Prop};
+use super::{LocStr, Param, Prop, tweak_err};
 
 static NAME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"\A[a-zA-Z0-9-]+"#).unwrap());
 static VALUE: LazyLock<Regex> =
@@ -17,23 +17,9 @@ static QUOTED: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"\A"[^\x00-\x08\x0A-\x1F\x7F"]*""#).unwrap());
 
 pub fn regex_preparse(v: &[u8]) -> Result<Prop, PreparseError> {
-    let is_non_tab_control = |index: usize| {
-        if index >= v.len() { false } else { v[index].is_ascii_control() && v[index] != b'\t' }
-    };
     match pre_preparse(v) {
         Ok(value) => Ok(value),
-        Err(rfc_err) => {
-            let mut err = rfc_err.clone();
-            if str::from_utf8(v).is_err() {
-                err.reason = UTF8_ERROR;
-            } else if is_non_tab_control(rfc_err.valid_up_to + 1) {
-                err.reason = CONTROL_CHARACTER;
-            } else if is_non_tab_control(rfc_err.valid_up_to) {
-                err.reason = CONTROL_CHARACTER;
-                err.valid_up_to = err.valid_up_to.saturating_sub(1);
-            }
-            Err(err)
-        }
+        Err(err) => tweak_err(err, v),
     }
 }
 pub fn pre_preparse(mut v: &[u8]) -> Result<Prop, PreparseError> {

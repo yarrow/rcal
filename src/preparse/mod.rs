@@ -3,7 +3,7 @@ use crate::error::PreparseError;
 use std::{mem, str};
 pub mod with_regex;
 
-const CONTROL_CHARACTER: &str = "ASCII control characters are not allowed, except tab (\\t)";
+pub const CONTROL_CHARACTER: &str = "ASCII control characters are not allowed, except tab (\\t)";
 const EMPTY_CONTENT_LINE: &str = "Empty content line";
 const NO_COLON_OR_SEMICOLON: &str =
     "Property name must be followed by a colon (:) or a semicolon (;)";
@@ -14,7 +14,7 @@ const NO_PARAM_NAME: &str = "No parameter name after semicolon";
 const NO_PROPERTY_NAME: &str = "Content line doesn't start with a property name";
 const NO_PROPERTY_VALUE: &str = "Content line has no property value";
 const UNEXPECTED_DOUBLE_QUOTE: &str = r#"unexpected double quote (")"#;
-const UTF8_ERROR: &str = "UTF8 error";
+pub const UTF8_ERROR: &str = "UTF8 error";
 
 /// A located `str`: a substring of a larger string, along with its location in that string.
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -34,6 +34,20 @@ pub struct Prop<'a> {
     pub(crate) value: LocStr<'a>,
 }
 
+// Content lines must be UTF8 and contain no ASCII control characters. We give those requirements
+// precedence over any other parsing errors.
+fn tweak_err(mut err: PreparseError, v: &[u8]) -> Result<Prop, PreparseError> {
+    use bstr::ByteSlice;
+    if let Err(utf8_err) = str::from_utf8(v) {
+        err.reason = UTF8_ERROR;
+        err.error_len =
+            if utf8_err.valid_up_to() == err.valid_up_to { utf8_err.error_len() } else { None };
+    } else if let Some(valid_up_to) = v.iter().position(|c| c.is_ascii_control() && *c != b'\t') {
+        err.reason = CONTROL_CHARACTER;
+        err.error_len = if valid_up_to == err.valid_up_to { Some(1) } else { None }
+    }
+    Err(err)
+}
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum State {
     ParamName,
@@ -80,14 +94,18 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
         }};
     }
 
+    let mut state = State::NonAscii; // Anything that's not `Value` or `ParamName`
+    //
     // Return an error: the input doesn't correspond to the basic grammar in RFC 5545 § 3.1
     macro_rules! rfc_err {
         ($reason: expr) => {
-            return Err(PreparseError { reason: $reason, valid_up_to: index, error_len: None })
+            return tweak_err(
+                PreparseError { reason: $reason, valid_up_to: index, error_len: None },
+                v,
+            )
         };
     }
 
-    let mut state = State::NonAscii; // Anything that's not `Value` or `ParamName`
     let len = v.len();
     while index < len {
         #[allow(non_contiguous_range_endpoints)]
@@ -102,7 +120,6 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
                 break;
             }
             ..b'\t' | 10..b' ' | 127 => rfc_err!(CONTROL_CHARACTER),
-            128.. => rfc_err!(UTF8_ERROR),
             _ => rfc_err!(if index == 0 { NO_PROPERTY_NAME } else { NO_COLON_OR_SEMICOLON }),
         }
     }
@@ -173,7 +190,7 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
             State::ParamName => {
                 finish_parameter!();
                 loop {
-                    match dbg!(this_byte) {
+                    match this_byte {
                         b'-' | b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' => next_byte_or_finish!(),
                         b'=' => {
                             if index == start {
@@ -184,7 +201,6 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
                         }
                         _ => rfc_err!(if index == start { NO_PARAM_NAME } else { NO_EQUAL_SIGN }),
                     }
-                    dbg!("in_loop");
                 }
             }
             State::StartParamValue => {
@@ -339,21 +355,16 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
             }
         }
     }
-    dbg!("after loop");
     debug_assert!(state != State::Value || index == v.len());
 
     match state {
         State::Value => Ok(Prop { name: property_name, parameters, value: loc_str!(start, index) }),
         State::NonAscii => panic!("BUG: should be impossible to exit loop with state == NonAscii"),
-        State::ParamName => {
-            rfc_err!(if index == start { NO_PARAM_NAME } else { NO_EQUAL_SIGN })
-        }
+        State::ParamName => rfc_err!(if index == start { NO_PARAM_NAME } else { NO_EQUAL_SIGN }),
         State::ParamQuoted => {
             rfc_err!(if pending_quote { UNEXPECTED_DOUBLE_QUOTE } else { NO_PROPERTY_VALUE })
         }
-        State::StartParamValue | State::ParamText => {
-            rfc_err!(NO_PROPERTY_VALUE)
-        }
+        State::StartParamValue | State::ParamText => rfc_err!(NO_PROPERTY_VALUE),
     }
 }
 // Taken from lib/rustlib/src/rust/library/core/src/str/validations.rs

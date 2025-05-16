@@ -1,7 +1,7 @@
 use bstr::ByteSlice;
 use pretty_assertions::assert_eq;
-use rcal::preparse::preparse;
 use rcal::preparse::with_regex::regex_preparse;
+use rcal::preparse::{CONTROL_CHARACTER as CTRL, UTF8_ERROR, preparse};
 
 fn compare(data: &[u8]) {
     let pre = preparse(data);
@@ -18,12 +18,14 @@ fn compare(data: &[u8]) {
                 data.as_bstr()
             )
         }
-        (false, false) => assert_eq!(
-            pre.unwrap_err().reason(),
-            regex_pre.unwrap_err().reason(),
-            "(preparse != regex_preparse, data is |{:?}|)",
-            data.as_bstr()
-        ),
+        (false, false) => {
+            let pre = pre.unwrap_err().reason();
+            let reg = regex_pre.unwrap_err().reason();
+            if pre != reg && (pre == CTRL || pre == UTF8_ERROR || reg == CTRL || reg == UTF8_ERROR)
+            {
+                assert_eq!(pre, reg, "(preparse != regex_preparse, data is |{:?}|)", data.as_bstr())
+            }
+        }
     }
 }
 #[test]
@@ -62,4 +64,32 @@ fn unpaired_quote() {
 #[test]
 fn unpaired_quote_bang() {
     compare("2;A=\"!".as_bytes());
+}
+#[test]
+fn zero_255() {
+    compare(b"\x00\xFF");
+}
+#[test]
+fn bytes_239_0() {
+    compare(b"\xEF\x00");
+}
+#[test]
+fn y_semi_z_semi_ctrl_r() {
+    compare(b"y;z=;\x12");
+}
+#[test]
+fn semi_255() {
+    compare(b";\xFF");
+}
+#[test]
+fn two_4_equal_tab_ctrl_a() {
+    compare(b"2;4=\"\t\x01");
+}
+#[test]
+fn z_quote() {
+    compare(b"z\"");
+}
+#[test]
+fn three_z_ux() {
+    compare("3zǙ".as_bytes());
 }

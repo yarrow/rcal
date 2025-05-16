@@ -76,7 +76,7 @@ impl NameIds {
         }
     }
     pub fn id(&mut self, name: &str) -> Result<usize, ParseError> {
-        if let Some((id_found, _)) = self.0.get_full(dbg!(name)) {
+        if let Some((id_found, _)) = self.0.get_full(name) {
             Ok(id_found)
         } else {
             let key = match well_formed(name) {
