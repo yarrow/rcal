@@ -1,8 +1,16 @@
-use crate::{ParseError, ParseResult, err};
+use crate::{NameError, NameResult};
 use indexmap::IndexSet;
 use rustc_hash::FxBuildHasher;
 use std::borrow::Cow;
 
+macro_rules! err {
+    ($msg:literal $(,)?) => { NameError(format!($msg))
+
+    };
+    ($fmt:expr, $($arg:tt)*) => {
+       NameError(format!($fmt, $($arg)*))
+    };
+}
 /// `Lookup` is a string interner for parameter and property names. It starts out
 #[derive(Default, Debug)]
 #[allow(dead_code)] // for now!
@@ -19,11 +27,11 @@ impl Lookup {
         }
     }
     #[inline]
-    pub fn known_parameter(&mut self, name: &'static str) -> ParseResult<ParameterId> {
+    pub fn known_parameter(&mut self, name: &'static str) -> NameResult<ParameterId> {
         self.parms.known_id(name).map(ParameterId)
     }
     #[inline]
-    pub fn parameter_id(&mut self, name: &str) -> ParseResult<ParameterId> {
+    pub fn parameter_id(&mut self, name: &str) -> NameResult<ParameterId> {
         self.parms.id(name).map(ParameterId)
     }
     #[inline]
@@ -32,11 +40,11 @@ impl Lookup {
         self.parms.name(id.0)
     }
     #[inline]
-    pub fn known_property(&mut self, name: &'static str) -> ParseResult<PropertyId> {
+    pub fn known_property(&mut self, name: &'static str) -> NameResult<PropertyId> {
         self.parms.known_id(name).map(PropertyId)
     }
     #[inline]
-    pub fn property_id(&mut self, name: &str) -> ParseResult<PropertyId> {
+    pub fn property_id(&mut self, name: &str) -> NameResult<PropertyId> {
         self.parms.id(name).map(PropertyId)
     }
     #[inline]
@@ -63,7 +71,7 @@ impl NameIds {
         }
         NameIds(set)
     }
-    pub fn known_id(&mut self, name: &'static str) -> Result<usize, ParseError> {
+    pub fn known_id(&mut self, name: &'static str) -> Result<usize, NameError> {
         match well_formed(name) {
             WellFormed::Uppercase => {
                 let (id, _) = self.0.insert_full(Cow::Borrowed(name));
@@ -75,7 +83,7 @@ impl NameIds {
             WellFormed::No => Err(err!("Not a valid name: '{name}'")),
         }
     }
-    pub fn id(&mut self, name: &str) -> Result<usize, ParseError> {
+    pub fn id(&mut self, name: &str) -> Result<usize, NameError> {
         if let Some((id_found, _)) = self.0.get_full(name) {
             Ok(id_found)
         } else {

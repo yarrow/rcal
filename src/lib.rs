@@ -9,7 +9,7 @@ pub mod rrule_error;
 pub use jiff::civil::Weekday;
 pub use property::PropertyValue;
 pub mod error;
-pub(crate) use error::{ParseError, ParseResult, err};
+pub(crate) use error::{NameError, NameResult};
 pub mod names;
 pub mod parameter;
 pub mod preparse;

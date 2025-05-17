@@ -1,20 +1,7 @@
 //! Operations related to RFC 5545 validation.
-use crate::error::PreparseError;
+use crate::error::{PreparseError, Problem, Segment};
 use std::{mem, str};
 pub mod with_regex;
-
-pub const CONTROL_CHARACTER: &str = "ASCII control characters are not allowed, except tab (\\t)";
-const EMPTY_CONTENT_LINE: &str = "Empty content line";
-const NO_COLON_OR_SEMICOLON: &str =
-    "Property name must be followed by a colon (:) or a semicolon (;)";
-const NO_COMMA_ETC: &str =
-    "Parameter value must be followed by a comma (,) or colon (:) or semicolon(;)";
-const NO_EQUAL_SIGN: &str = "Parameter name must be follow by an equal sign (=)";
-const NO_PARAM_NAME: &str = "No parameter name after semicolon";
-const NO_PROPERTY_NAME: &str = "Content line doesn't start with a property name";
-const NO_PROPERTY_VALUE: &str = "Content line has no property value";
-const UNEXPECTED_DOUBLE_QUOTE: &str = r#"unexpected double quote (")"#;
-pub const UTF8_ERROR: &str = "UTF8 error";
 
 /// A located `str`: a substring of a larger string, along with its location in that string.
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -22,12 +9,12 @@ pub struct LocStr<'a> {
     pub loc: usize,
     pub(crate) val: &'a str,
 }
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Param<'a> {
     pub(crate) name: LocStr<'a>,
     pub(crate) values: Vec<LocStr<'a>>,
 }
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Prop<'a> {
     pub name: LocStr<'a>,
     pub(crate) parameters: Vec<Param<'a>>,
@@ -36,17 +23,19 @@ pub struct Prop<'a> {
 
 // Content lines must be UTF8 and contain no ASCII control characters. We give those requirements
 // precedence over any other parsing errors.
-fn tweak_err(mut err: PreparseError, v: &[u8]) -> Result<Prop, PreparseError> {
-    use bstr::ByteSlice;
+fn tweak_err(err: PreparseError, v: &[u8]) -> Result<Prop, PreparseError> {
+    Err(tweak(err, v))
+}
+fn tweak(mut err: PreparseError, v: &[u8]) -> PreparseError {
     if let Err(utf8_err) = str::from_utf8(v) {
-        err.reason = UTF8_ERROR;
+        err.problem = Problem::Utf8Error {
+            valid_up_to: utf8_err.valid_up_to(),
+            error_len: utf8_err.error_len().map(|len| len as u8),
+        };
         err.error_len =
             if utf8_err.valid_up_to() == err.valid_up_to { utf8_err.error_len() } else { None };
-    } else if let Some(valid_up_to) = v.iter().position(|c| c.is_ascii_control() && *c != b'\t') {
-        err.reason = CONTROL_CHARACTER;
-        err.error_len = if valid_up_to == err.valid_up_to { Some(1) } else { None }
     }
-    Err(err)
+    err
 }
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum State {
@@ -94,42 +83,58 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
         }};
     }
 
+    let mut segment = Segment::PropertyName;
     let mut state = State::NonAscii; // Anything that's not `Value` or `ParamName`
     //
     // Return an error: the input doesn't correspond to the basic grammar in RFC 5545 § 3.1
     macro_rules! rfc_err {
-        ($reason: expr) => {
+        ($problem: expr) => {
             return tweak_err(
-                PreparseError { reason: $reason, valid_up_to: index, error_len: None },
+                PreparseError { segment, problem: $problem, valid_up_to: index, error_len: None },
                 v,
             )
         };
     }
 
     let len = v.len();
+    if len == 0 {
+        rfc_err!(Problem::EmptyContentLine);
+    }
     while index < len {
         #[allow(non_contiguous_range_endpoints)]
         match v[index] {
             b'-' | b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' => index += 1, // Maintains the invariant since
             b':' => {
+                segment = Segment::ParamValue;
                 state = State::Value;
                 break;
             }
             b';' => {
+                segment = Segment::ParamName;
                 state = State::ParamName;
                 break;
             }
-            ..b'\t' | 10..b' ' | 127 => rfc_err!(CONTROL_CHARACTER),
-            _ => rfc_err!(if index == 0 { NO_PROPERTY_NAME } else { NO_COLON_OR_SEMICOLON }),
+            ..b'\t' | 10..b' ' | 127 => {
+                rfc_err!(Problem::ControlCharacter)
+            }
+            _ => {
+                if index == 0 {
+                    rfc_err!(Problem::Empty)
+                } else {
+                    rfc_err!(Problem::Unterminated)
+                }
+            }
         }
     }
+    if index == 0 {
+        segment = Segment::PropertyName;
+        rfc_err!(Problem::Empty);
+    }
     if !matches!(state, State::Value | State::ParamName) {
-        rfc_err!(if len == 0 { EMPTY_CONTENT_LINE } else { NO_PROPERTY_VALUE });
+        segment = Segment::PropertyValue;
+        rfc_err!(Problem::Empty);
     }
 
-    if index == 0 {
-        rfc_err!(NO_PROPERTY_NAME);
-    }
     let mut param_name = LocStr::default();
     let mut param_values = Vec::<LocStr>::new();
     let mut parameters = Vec::<Param<'a>>::new();
@@ -188,22 +193,30 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
 
         match state {
             State::ParamName => {
+                segment = Segment::ParamName;
                 finish_parameter!();
                 loop {
                     match this_byte {
                         b'-' | b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' => next_byte_or_finish!(),
                         b'=' => {
                             if index == start {
-                                rfc_err!(NO_PARAM_NAME)
+                                rfc_err!(Problem::Empty)
                             }
                             param_name = loc_str!(start, index);
                             change_state_to!(State::StartParamValue);
                         }
-                        _ => rfc_err!(if index == start { NO_PARAM_NAME } else { NO_EQUAL_SIGN }),
+                        _ => {
+                            if index == start {
+                                rfc_err!(Problem::Empty)
+                            } else {
+                                rfc_err!(Problem::Unterminated)
+                            }
+                        }
                     }
                 }
             }
             State::StartParamValue => {
+                segment = Segment::ParamValue;
                 if v[index] == b'"' {
                     index += 1;
                     state = State::ParamQuoted;
@@ -218,7 +231,7 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
                     b'\t' | b' '..b'"' | b'#'..b',' | b'-'..b':' | b'<'..127 => {
                         next_byte_or_finish!();
                     }
-                    b'"' => rfc_err!(UNEXPECTED_DOUBLE_QUOTE),
+                    b'"' => rfc_err!(Problem::DoubleQuote),
                     b',' => {
                         param_values.push(loc_str!(start, index));
                         change_state_to!(State::StartParamValue);
@@ -226,13 +239,14 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
                     b':' => {
                         param_values.push(loc_str!(start, index));
                         finish_parameter!();
+                        segment = Segment::ParamValue;
                         change_state_to!(State::Value);
                     }
                     b';' => {
                         param_values.push(loc_str!(start, index));
                         change_state_to!(State::ParamName);
                     }
-                    _ => rfc_err!(CONTROL_CHARACTER),
+                    _ => rfc_err!(Problem::ControlCharacter),
                 }
             },
             State::ParamQuoted => loop {
@@ -248,22 +262,24 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
                             b',' => change_state_to!(State::StartParamValue),
                             b':' => {
                                 finish_parameter!();
+                                segment = Segment::ParamValue;
                                 change_state_to!(State::Value)
                             }
                             b';' => change_state_to!(State::ParamName),
-                            _ => rfc_err!(NO_COMMA_ETC),
+                            _ => rfc_err!(Problem::Unterminated),
                         }
                     }
-                    _ => rfc_err!(CONTROL_CHARACTER),
+                    _ => rfc_err!(Problem::ControlCharacter),
                 }
             },
             State::Value => {
+                segment = Segment::PropertyValue;
                 finish_parameter!();
                 loop {
                     handle_non_ascii!();
                     match this_byte {
                         b'\t' | b' '..127 => next_byte_or_finish!(),
-                        _ => rfc_err!(CONTROL_CHARACTER),
+                        _ => rfc_err!(Problem::ControlCharacter),
                     }
                 }
             }
@@ -287,7 +303,11 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
                     macro_rules! utf8_err {
                         ($error_len: expr) => {
                             return Err(PreparseError {
-                                reason: UTF8_ERROR,
+                                segment,
+                                problem: Problem::Utf8Error {
+                                    valid_up_to: old_offset,
+                                    error_len: $error_len,
+                                },
                                 valid_up_to: old_offset,
                                 error_len: $error_len,
                             })
@@ -360,11 +380,25 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
     match state {
         State::Value => Ok(Prop { name: property_name, parameters, value: loc_str!(start, index) }),
         State::NonAscii => panic!("BUG: should be impossible to exit loop with state == NonAscii"),
-        State::ParamName => rfc_err!(if index == start { NO_PARAM_NAME } else { NO_EQUAL_SIGN }),
-        State::ParamQuoted => {
-            rfc_err!(if pending_quote { UNEXPECTED_DOUBLE_QUOTE } else { NO_PROPERTY_VALUE })
+        State::ParamName => {
+            if index == start {
+                rfc_err!(Problem::Empty)
+            } else {
+                rfc_err!(Problem::Unterminated)
+            }
         }
-        State::StartParamValue | State::ParamText => rfc_err!(NO_PROPERTY_VALUE),
+        State::ParamQuoted => {
+            if pending_quote {
+                rfc_err!(Problem::DoubleQuote)
+            } else {
+                segment = Segment::PropertyValue;
+                rfc_err!(Problem::Empty);
+            }
+        }
+        State::StartParamValue | State::ParamText => {
+            segment = Segment::PropertyValue;
+            rfc_err!(Problem::Empty)
+        }
     }
 }
 // Taken from lib/rustlib/src/rust/library/core/src/str/validations.rs
@@ -399,190 +433,4 @@ fn utf8_char_width(b: u8) -> usize {
 }
 
 #[cfg(test)]
-#[macro_export]
-macro_rules! preparse_tests {
-    ($preparse:ident) => {
-        mod test {
-            use super::*;
-            use bstr::BString;
-            use pretty_assertions::assert_eq;
-
-            fn error_for(s: &str) -> &'static str {
-                $preparse(s.as_bytes()).unwrap_err().reason
-            }
-
-            fn parse(text: &str) -> StrProp<'_> {
-                delocate(&$preparse(text.as_bytes()).unwrap())
-            }
-
-            // Test error messages
-            fn error_is(text: &str, expected: &str) {
-                assert_eq!(error_for(text), expected, "text: |{text}|");
-            }
-            #[test]
-            fn property_name_only() {
-                error_is("A", NO_PROPERTY_VALUE);
-            }
-            #[test]
-            fn property_name_semicolon_only() {
-                error_is("A;", NO_PARAM_NAME);
-            }
-            #[test]
-            fn no_property_value() {
-                error_is("A;B=", NO_PROPERTY_VALUE);
-                error_is("A;B=c", NO_PROPERTY_VALUE);
-            }
-            #[test]
-            fn quotes_allow_punctuation_in_values() {
-                error_is(r#"A;B=",C=:""#, NO_PROPERTY_VALUE);
-                error_is(r#"A;B=":C=:""#, NO_PROPERTY_VALUE);
-                error_is(r#"A;B=";C=:""#, NO_PROPERTY_VALUE);
-            }
-            #[test]
-            fn forbid_embedded_dquotes() {
-                error_is(r#"A;B=ab"c":val"#, UNEXPECTED_DOUBLE_QUOTE);
-            }
-            #[test]
-            fn forbid_space_after_ending_dquote() {
-                error_is(r#"A;B="c" ,"d":val"#, NO_COMMA_ETC);
-            }
-            #[test]
-            fn property_name_required() {
-                error_is(":foo", NO_PROPERTY_NAME);
-                error_is("/foo", NO_PROPERTY_NAME);
-            }
-            #[test]
-            fn forbid_empty_content_line() {
-                error_is("", EMPTY_CONTENT_LINE);
-            }
-            #[test]
-            fn value_required() {
-                error_is("K", NO_PROPERTY_VALUE);
-            }
-            #[test]
-            fn parameter_name_required() {
-                error_is("Foo;=bar:", NO_PARAM_NAME);
-                error_is("Foo;/:", NO_PARAM_NAME);
-            }
-            #[test]
-            fn must_be_utf8_len_2() {
-                let mut bad = BString::from("FOO:bá");
-                //let mut bad = BString::from("abc𒀁");
-                let len = bad.len();
-                bad[len - 1] = b'a';
-                assert_eq!($preparse(bad.as_slice()).unwrap_err().reason, UTF8_ERROR, "text: {:?}", bad);
-            }
-            #[test]
-            fn must_be_utf8_len_4() {
-                let mut bad = BString::from("abc𒀁");
-                let len = bad.len();
-                bad[len - 2] = b'a';
-                assert_eq!($preparse(bad.as_slice()).unwrap_err().reason, UTF8_ERROR, "text: {:?}", bad);
-            }
-            // Tests for the result returned
-            #[derive(Debug, PartialEq)]
-            struct StrParam<'a> {
-                name: &'a str,
-                values: Vec<&'a str>,
-            }
-            #[derive(Debug, PartialEq)]
-            struct StrProp<'a> {
-                name: &'a str,
-                parameters: Vec<StrParam<'a>>,
-                value: &'a str,
-            }
-            fn delocate<'a>(prop: &Prop<'a>) -> StrProp<'a> {
-                StrProp {
-                    name: prop.name.val,
-                    value: prop.value.val,
-                    parameters: prop
-                        .parameters
-                        .iter()
-                        .map(|param| StrParam {
-                            name: param.name.val,
-                            values: param.values.iter().map(|value| value.val).collect(),
-                        })
-                        .collect(),
-                }
-            }
-            fn as_expected(text: &str, expected: StrProp) {
-                assert_eq!(parse(text), expected, "text: |{text}|");
-            }
-
-            #[test]
-            fn minimal() {
-                let text = "-:";
-                let expected = StrProp { name: "-", value: "", parameters: Vec::new() };
-                as_expected(text, expected);
-            }
-            #[test]
-            fn attach() {
-                let text =
-                    "ATTACH;FMTTYPE=text/plain;ENCODING=BASE64;VALUE=BINARY:VGhlIHF1aWNrIGJyb3duIGZveAo=";
-                let expected = StrProp {
-                    name: "ATTACH",
-                    value: "VGhlIHF1aWNrIGJyb3duIGZveAo=",
-                    parameters: vec![
-                        StrParam { name: "FMTTYPE", values: vec!["text/plain"] },
-                        StrParam { name: "ENCODING", values: vec!["BASE64"] },
-                        StrParam { name: "VALUE", values: vec!["BINARY"] },
-                    ],
-                };
-                as_expected(text, expected);
-            }
-            #[test]
-            fn vanilla() {
-                let text = "FOO;BAR=baz:bex";
-                let expected = StrProp {
-                    name: "FOO",
-                    value: "bex",
-                    parameters: vec![StrParam { name: "BAR", values: vec!["baz"] }],
-                };
-                as_expected(text, expected);
-            }
-            #[test]
-            fn non_ascii() {
-                let text = r#"FOO;BAR=íííí,,"óu":béééé"#;
-                let expected = StrProp {
-                    name: "FOO",
-                    value: "béééé",
-                    parameters: vec![StrParam { name: "BAR", values: vec!["íííí", "", "óu"] }],
-                };
-                as_expected(text, expected);
-            }
-            #[test]
-            fn comma_comma_comma() {
-                let text = "FOO;BAR=,,,:bex";
-                let expected = StrProp {
-                    name: "FOO",
-                    value: "bex",
-                    parameters: vec![StrParam { name: "BAR", values: vec!["", "", "", ""] }],
-                };
-                as_expected(text, expected);
-            }
-            #[test]
-            fn empty_param_value_list() {
-                let text = "FOO;BAR=:bex";
-                let expected = StrProp {
-                    name: "FOO",
-                    value: "bex",
-                    parameters: vec![StrParam { name: "BAR", values: vec![""] }],
-                };
-                as_expected(text, expected);
-            }
-            #[test]
-            fn regression_2a() {
-                let text = "2;a=:";
-                let expected = StrProp {
-                    name: "2",
-                    value: "",
-                    parameters: vec![StrParam { name: "a", values: vec![""] }],
-                };
-                as_expected(text, expected);
-            }
-        }
-
-    };
-}
-#[cfg(test)]
-preparse_tests!(preparse);
+mod tests;

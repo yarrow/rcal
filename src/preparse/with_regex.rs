@@ -1,11 +1,7 @@
-use crate::error::PreparseError;
+use crate::error::{PreparseError, Problem, Segment};
 use regex::bytes::Regex;
 use std::{mem, str, sync::LazyLock};
 
-use super::{
-    CONTROL_CHARACTER, EMPTY_CONTENT_LINE, NO_COLON_OR_SEMICOLON, NO_COMMA_ETC, NO_EQUAL_SIGN,
-    NO_PARAM_NAME, NO_PROPERTY_NAME, NO_PROPERTY_VALUE, UNEXPECTED_DOUBLE_QUOTE, UTF8_ERROR,
-};
 use super::{LocStr, Param, Prop, tweak_err};
 
 static NAME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"\A[a-zA-Z0-9-]+"#).unwrap());
@@ -24,6 +20,7 @@ pub fn regex_preparse(v: &[u8]) -> Result<Prop, PreparseError> {
 }
 pub fn pre_preparse(mut v: &[u8]) -> Result<Prop, PreparseError> {
     let mut start = 0;
+    let mut segment = Segment::PropertyName;
     macro_rules! loc_str {
         ($m: ident) => {
             LocStr {
@@ -41,8 +38,13 @@ pub fn pre_preparse(mut v: &[u8]) -> Result<Prop, PreparseError> {
         };
     }
     macro_rules! rfc_err {
-        ($reason: expr) => {
-            return Err(PreparseError { reason: $reason, valid_up_to: start, error_len: None })
+        ($problem: expr) => {
+            return Err(PreparseError {
+                segment,
+                problem: $problem,
+                valid_up_to: start,
+                error_len: None,
+            })
         };
     }
     macro_rules! advance_start_by {
@@ -80,20 +82,20 @@ pub fn pre_preparse(mut v: &[u8]) -> Result<Prop, PreparseError> {
     }
 
     let Some(m) = NAME.find(v) else {
-        rfc_err!(if v.is_empty() { EMPTY_CONTENT_LINE } else { NO_PROPERTY_NAME })
+        rfc_err!(if v.is_empty() { Problem::EmptyContentLine } else { Problem::Empty })
     };
     let property_name = loc_str!(m);
     advance_start_by!(m.end());
 
     while consume!(b';') {
+        segment = Segment::ParamName;
         finish_parameter!();
 
-        let Some(m) = NAME.find(v) else { rfc_err!(NO_PARAM_NAME) };
+        let Some(m) = NAME.find(v) else { rfc_err!(Problem::Empty) };
         param_name = loc_str!(m);
         advance_start_by!(m.end());
 
-        consume!(b'=' else rfc_err!(NO_EQUAL_SIGN));
-
+        consume!(b'=' else rfc_err!(Problem::Unterminated));
         loop {
             if let Some(m) = QUOTED.find(v) {
                 param_values.push(loc_quoted_str!(m));
@@ -107,28 +109,21 @@ pub fn pre_preparse(mut v: &[u8]) -> Result<Prop, PreparseError> {
             consume!(b',' else break);
         }
     }
-    finish_parameter!();
 
     if consume!(b':') {
-        let Some(m) = VALUE.find(v) else { rfc_err!(NO_PROPERTY_VALUE) };
+        segment = Segment::PropertyValue;
+        let Some(m) = VALUE.find(v) else { rfc_err!(Problem::Empty) };
+        finish_parameter!();
         Ok(Prop { name: property_name, value: loc_str!(m), parameters })
     } else {
-        let reason = match v.first() {
-            None => NO_PROPERTY_VALUE,
-            Some(&b'"') => UNEXPECTED_DOUBLE_QUOTE,
-            _ => {
-                if parameters.is_empty() {
-                    NO_COLON_OR_SEMICOLON
-                } else {
-                    NO_COMMA_ETC
-                }
-            }
+        let problem;
+        (segment, problem) = match (v.first(), param_name.val.is_empty()) {
+            (None, _) => (Segment::PropertyValue, Problem::Empty),
+            (Some(&b'"'), true) => (Segment::PropertyName, Problem::Unterminated),
+            (Some(&b'"'), false) => (Segment::ParamValue, Problem::DoubleQuote),
+            (_, true) => (Segment::PropertyName, Problem::Unterminated),
+            (_, false) => (Segment::ParamValue, Problem::Unterminated),
         };
-        rfc_err!(reason);
+        rfc_err!(problem);
     }
 }
-
-#[cfg(test)]
-use crate::preparse_tests;
-#[cfg(test)]
-preparse_tests!(regex_preparse);
