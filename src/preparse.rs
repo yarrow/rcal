@@ -23,19 +23,19 @@ pub struct Prop<'a> {
 
 // Content lines must be UTF8 and contain no ASCII control characters. We give those requirements
 // precedence over any other parsing errors.
-fn tweak_err(err: PreparseError, v: &[u8]) -> Result<Prop, PreparseError> {
-    Err(tweak(err, v))
-}
-fn tweak(mut err: PreparseError, v: &[u8]) -> PreparseError {
-    if let Err(utf8_err) = str::from_utf8(v) {
-        err.problem = Problem::Utf8Error {
-            valid_up_to: utf8_err.valid_up_to(),
-            error_len: utf8_err.error_len().map(|len| len as u8),
-        };
-        err.error_len =
-            if utf8_err.valid_up_to() == err.valid_up_to { utf8_err.error_len() } else { None };
+fn detect_utf8_error(mut err: PreparseError, v: &[u8]) -> Result<Prop, PreparseError> {
+    // If the position where we stopped parsing is the start of bad UTF8, report that as our `problem`
+    let bad_place = err.valid_up_to;
+    if bad_place < v.len() && v[bad_place] >= 128 {
+        let remaining = &v[bad_place..];
+        #[allow(clippy::cast_possible_truncation)]
+        if let Err(utf8) = str::from_utf8(remaining) {
+            if utf8.valid_up_to() == 0 {
+                err.problem = Problem::Utf8Error(utf8.error_len().map(|len| len as u8));
+            }
+        }
     }
-    err
+    Err(err)
 }
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum State {
@@ -50,7 +50,8 @@ enum State {
     clippy::unnested_or_patterns,
     clippy::missing_panics_doc,
     clippy::too_many_lines,
-    clippy::cast_possible_wrap
+    clippy::cast_possible_wrap,
+    non_contiguous_range_endpoints
 )]
 pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
     // INVARIANT: `v[start..index]` is a valid UTF8 string. (Implies `start <= index && index <= v.len()`)
@@ -89,8 +90,14 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
     // Return an error: the input doesn't correspond to the basic grammar in RFC 5545 § 3.1
     macro_rules! rfc_err {
         ($problem: expr) => {
-            return tweak_err(
-                PreparseError { segment, problem: $problem, valid_up_to: index, error_len: None },
+            return Err(PreparseError { segment, problem: $problem, valid_up_to: index })
+        };
+    }
+
+    macro_rules! check_for_utf8_error {
+        ($problem: expr) => {
+            return detect_utf8_error(
+                PreparseError { segment, problem: $problem, valid_up_to: index },
                 v,
             )
         };
@@ -101,7 +108,6 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
         rfc_err!(Problem::EmptyContentLine);
     }
     while index < len {
-        #[allow(non_contiguous_range_endpoints)]
         match v[index] {
             b'-' | b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' => index += 1, // Maintains the invariant since
             b':' => {
@@ -117,24 +123,20 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
             ..b'\t' | 10..b' ' | 127 => {
                 rfc_err!(Problem::ControlCharacter)
             }
-            _ => {
-                if index == 0 {
-                    rfc_err!(Problem::Empty)
-                } else {
-                    rfc_err!(Problem::Unterminated)
-                }
-            }
+            _ => check_for_utf8_error!(if index == 0 {
+                Problem::Empty
+            } else {
+                Problem::Unterminated
+            }),
         }
     }
     if index == 0 {
         segment = Segment::PropertyName;
-        rfc_err!(Problem::Empty);
+        check_for_utf8_error!(Problem::Empty);
     }
-    if !matches!(state, State::Value | State::ParamName) {
-        segment = Segment::PropertyValue;
-        rfc_err!(Problem::Empty);
+    if segment == Segment::PropertyName {
+        check_for_utf8_error!(if index == 0 { Problem::Empty } else { Problem::Unterminated });
     }
-
     let mut param_name = LocStr::default();
     let mut param_values = Vec::<LocStr>::new();
     let mut parameters = Vec::<Param<'a>>::new();
@@ -205,12 +207,13 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
                             param_name = loc_str!(start, index);
                             change_state_to!(State::StartParamValue);
                         }
+                        ..b'\t' | 10..b' ' | 127 => {
+                            rfc_err!(Problem::ControlCharacter)
+                        }
                         _ => {
-                            if index == start {
-                                rfc_err!(Problem::Empty)
-                            } else {
-                                rfc_err!(Problem::Unterminated)
-                            }
+                            let problem =
+                                if index == start { Problem::Empty } else { Problem::Unterminated };
+                            check_for_utf8_error!(problem);
                         }
                     }
                 }
@@ -239,11 +242,12 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
                     b':' => {
                         param_values.push(loc_str!(start, index));
                         finish_parameter!();
-                        segment = Segment::ParamValue;
+                        segment = Segment::PropertyValue;
                         change_state_to!(State::Value);
                     }
                     b';' => {
                         param_values.push(loc_str!(start, index));
+                        segment = Segment::ParamName;
                         change_state_to!(State::ParamName);
                     }
                     _ => rfc_err!(Problem::ControlCharacter),
@@ -266,7 +270,11 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
                                 change_state_to!(State::Value)
                             }
                             b';' => change_state_to!(State::ParamName),
-                            _ => rfc_err!(Problem::Unterminated),
+                            ..b'\t' | 10..b' ' | 127 => {
+                                rfc_err!(Problem::ControlCharacter)
+                            }
+                            b'"' => rfc_err!(Problem::DoubleQuote),
+                            _ => check_for_utf8_error!(Problem::Unterminated),
                         }
                     }
                     _ => rfc_err!(Problem::ControlCharacter),
@@ -290,6 +298,15 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
                     // Taken from `run_utf8_validation` in
                     // lib/rustlib/src/rust/library/core/src/str/validations.rs
                     let old_offset = index;
+                    macro_rules! utf8_err {
+                        ($error_len: expr) => {
+                            return Err(PreparseError {
+                                segment,
+                                problem: Problem::Utf8Error($error_len),
+                                valid_up_to: old_offset,
+                            })
+                        };
+                    }
                     macro_rules! next {
                         () => {{
                             index += 1;
@@ -299,19 +316,6 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
                             }
                             v[index]
                         }};
-                    }
-                    macro_rules! utf8_err {
-                        ($error_len: expr) => {
-                            return Err(PreparseError {
-                                segment,
-                                problem: Problem::Utf8Error {
-                                    valid_up_to: old_offset,
-                                    error_len: $error_len,
-                                },
-                                valid_up_to: old_offset,
-                                error_len: $error_len,
-                            })
-                        };
                     }
 
                     let w = utf8_char_width(this_byte);
@@ -381,15 +385,12 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
         State::Value => Ok(Prop { name: property_name, parameters, value: loc_str!(start, index) }),
         State::NonAscii => panic!("BUG: should be impossible to exit loop with state == NonAscii"),
         State::ParamName => {
-            if index == start {
-                rfc_err!(Problem::Empty)
-            } else {
-                rfc_err!(Problem::Unterminated)
-            }
+            segment = Segment::ParamName;
+            if index == start { rfc_err!(Problem::Empty) } else { rfc_err!(Problem::Unterminated) }
         }
         State::ParamQuoted => {
             if pending_quote {
-                rfc_err!(Problem::DoubleQuote)
+                rfc_err!(Problem::UnclosedQuote)
             } else {
                 segment = Segment::PropertyValue;
                 rfc_err!(Problem::Empty);

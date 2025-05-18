@@ -1,119 +1,80 @@
 use super::with_regex::regex_preparse;
 use super::*;
+use crate::error::{Problem, Segment};
+use Problem::*;
+use Segment::*;
 use bstr::BString;
+use bstr::ByteSlice;
 use pretty_assertions::assert_eq;
-
-use crate::error::{
-    EMPTY_CONTENT_LINE, NO_COMMA_ETC, NO_PARAM_NAME, NO_PROPERTY_NAME, NO_PROPERTY_VALUE,
-    UNEXPECTED_DOUBLE_QUOTE, UTF8_ERROR,
-};
 
 fn equivalent_from_bytes(text: &[u8]) -> Result<Prop, PreparseError> {
     let pre = preparse(text);
     let reg = regex_preparse(text);
-    match (pre.is_ok(), reg.is_ok()) {
-        (true, true) | (true, false) | (false, true) => {
-            assert_eq!(pre, reg, "pre!=reg, text: {text:?}\npre: {pre:#?}\nreg: {reg:#?}");
-        }
-        (false, false) => {
-            let pre = pre.clone().unwrap_err();
-            let reg = reg.unwrap_err();
-            let ex_pre = pre.segment;
-            let rs_pre = pre.reason();
-            let ex_reg = reg.segment;
-            let rs_reg = pre.reason();
-            assert_eq!(
-                (ex_pre, rs_pre),
-                (ex_reg, rs_reg),
-                "pre!=reg, text: {text:?}\npre: {pre:#?}\nreg: {reg:#?}"
-            );
-        }
-    }
+    assert_eq!(pre, reg, "pre!=reg, text: {:?}\n pre {:?}\nreg {:?}", text.as_bstr(), pre, reg);
     pre
 }
 fn equivalent(text: &str) -> Result<Prop, PreparseError> {
     let pre = preparse(text.as_bytes());
     let reg = regex_preparse(text.as_bytes());
-    match (pre.is_ok(), reg.is_ok()) {
-        (true, true) | (true, false) | (false, true) => {
-            assert_eq!(pre, reg, "pre!=reg, text: {text}\n{pre:#?}\n{reg:#?}");
-        }
-        (false, false) => {
-            let pre = pre.clone().unwrap_err();
-            let reg = reg.unwrap_err();
-            let ex_pre = pre.segment;
-            let rs_pre = pre.reason();
-            let ex_reg = reg.segment;
-            let rs_reg = pre.reason();
-            assert_eq!(
-                (ex_pre, rs_pre),
-                (ex_reg, rs_reg),
-                "pre!=reg, text: {text}\npre: {pre:#?}\nreg: {reg:#?}"
-            );
-        }
-    }
+    assert_eq!(pre, reg, "pre!=reg, text: {text}");
     pre
 }
-fn error_for_bytes(text: &[u8]) -> &'static str {
-    equivalent_from_bytes(text).unwrap_err().reason()
+fn err_for(text: &str) -> (Segment, Problem) {
+    let err = equivalent(text).unwrap_err();
+    (err.segment, err.problem)
 }
-
-fn error_for(text: &str) -> &'static str {
-    equivalent_from_bytes(text.as_bytes()).unwrap_err().reason()
+fn err_from_bytes(text: &[u8]) -> (Segment, Problem) {
+    let err = equivalent_from_bytes(text).unwrap_err();
+    (err.segment, err.problem)
 }
 
 fn parse(text: &str) -> StrProp<'_> {
     delocate(&equivalent(text).unwrap())
 }
 
-// Test error messages
-fn error_is(text: &str, expected: &str) {
-    assert_eq!(error_for(text), expected, "text: |{text}|");
+fn err_is(text: &str, expected: (Segment, Problem)) {
+    assert_eq!(err_for(text), expected, "text: |{text}|");
 }
 #[test]
 fn property_name_only() {
-    error_is("A", NO_PROPERTY_VALUE);
+    err_is("A", (PropertyName, Unterminated));
 }
 #[test]
 fn property_name_semicolon_only() {
-    error_is("A;", NO_PARAM_NAME);
+    err_is("A;", (ParamName, Empty));
 }
 #[test]
 fn no_property_value() {
-    error_is("A;B=", NO_PROPERTY_VALUE);
-    error_is("A;B=c", NO_PROPERTY_VALUE);
+    err_is("A;B=", (PropertyValue, Empty));
+    err_is("A;B=c", (PropertyValue, Empty));
 }
 #[test]
 fn quotes_allow_punctuation_in_values() {
-    error_is(r#"A;B=",C=:""#, NO_PROPERTY_VALUE);
-    error_is(r#"A;B=":C=:""#, NO_PROPERTY_VALUE);
-    error_is(r#"A;B=";C=:""#, NO_PROPERTY_VALUE);
+    err_is(r#"A;B=",C=:""#, (PropertyValue, Empty));
+    err_is(r#"A;B=":C=:""#, (PropertyValue, Empty));
+    err_is(r#"A;B=";C=:""#, (PropertyValue, Empty));
 }
 #[test]
 fn forbid_embedded_dquotes() {
-    error_is(r#"A;B=ab"c":val"#, UNEXPECTED_DOUBLE_QUOTE);
+    err_is(r#"A;B=ab"c":val"#, (ParamValue, DoubleQuote));
 }
 #[test]
 fn forbid_space_after_ending_dquote() {
-    error_is(r#"A;B="c" ,"d":val"#, NO_COMMA_ETC);
+    err_is(r#"A;B="c" ,"d":val"#, (ParamValue, Unterminated));
 }
 #[test]
 fn property_name_required() {
-    error_is(":foo", NO_PROPERTY_NAME);
-    error_is("/foo", NO_PROPERTY_NAME);
+    err_is(":foo", (PropertyName, Empty));
+    err_is("/foo", (PropertyName, Empty));
 }
 #[test]
 fn forbid_empty_content_line() {
-    error_is("", EMPTY_CONTENT_LINE);
-}
-#[test]
-fn value_required() {
-    error_is("K", NO_PROPERTY_VALUE);
+    err_is("", (PropertyName, EmptyContentLine));
 }
 #[test]
 fn parameter_name_required() {
-    error_is("Foo;=bar:", NO_PARAM_NAME);
-    error_is("Foo;/:", NO_PARAM_NAME);
+    err_is("Foo;=bar:", (ParamName, Empty));
+    err_is("Foo;/:", (ParamName, Empty));
 }
 #[test]
 fn must_be_utf8_len_2() {
@@ -121,14 +82,24 @@ fn must_be_utf8_len_2() {
     //let mut bad = BString::from("abc𒀁");
     let len = bad.len();
     bad[len - 1] = b'a';
-    assert_eq!(error_for_bytes(bad.as_slice()), UTF8_ERROR, "text: {:?}", bad);
+    assert_eq!(
+        err_from_bytes(bad.as_slice()),
+        (PropertyValue, Utf8Error(Some(1))),
+        "text: {:?}",
+        bad
+    );
 }
 #[test]
 fn must_be_utf8_len_4() {
     let mut bad = BString::from("abc𒀁");
     let len = bad.len();
     bad[len - 2] = b'a';
-    assert_eq!(error_for_bytes(bad.as_slice()), UTF8_ERROR, "text: {:?}", bad);
+    assert_eq!(
+        err_from_bytes(bad.as_slice()),
+        (PropertyName, Utf8Error(Some(2))),
+        "text: {:?}",
+        bad
+    );
 }
 // Tests for the result returned
 #[derive(Debug, PartialEq)]
@@ -156,6 +127,7 @@ fn delocate<'a>(prop: &Prop<'a>) -> StrProp<'a> {
             .collect(),
     }
 }
+#[allow(clippy::needless_pass_by_value)]
 fn as_expected(text: &str, expected: StrProp) {
     assert_eq!(parse(text), expected, "text: |{text}|");
 }
@@ -293,4 +265,33 @@ fn three_z_ux() {
 #[test]
 fn six_t_null() {
     compare(b"6:t\0");
+}
+#[test]
+fn z_a_qmark() {
+    compare(b"z;A\xDF");
+}
+#[test]
+fn b_z_sema_2_comma_semi() {
+    compare(b"z;2=,;");
+}
+#[test]
+fn two_a_empty_quote_semi() {
+    let text = "2;A=\"\";";
+    compare(text.as_bytes());
+}
+#[test]
+fn two_a_empty_quote_semi_ctrl_a() {
+    let text = "2;A=\"\"\x01".as_bytes();
+    compare(text);
+}
+#[test]
+fn z_semi_bad() {
+    let text = b"z;\xD9".as_bytes();
+    compare(text);
+}
+#[test]
+fn z_semi_z_qqq() {
+    let text = r#"z;z=""""#;
+    eprintln!("{text}");
+    compare(text.as_bytes());
 }

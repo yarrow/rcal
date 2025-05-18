@@ -35,8 +35,9 @@ pub enum Segment {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Problem {
     ControlCharacter,
-    Utf8Error { valid_up_to: usize, error_len: Option<u8> },
+    Utf8Error(Option<u8>),
     DoubleQuote,
+    UnclosedQuote,
     EmptyContentLine,
     Empty,
     Unterminated,
@@ -47,33 +48,36 @@ pub struct PreparseError {
     pub(crate) segment: Segment,
     pub(crate) problem: Problem,
     pub(crate) valid_up_to: usize,
-    pub(crate) error_len: Option<usize>,
 }
 impl PreparseError {
+    #[must_use]
     pub fn reason(&self) -> &'static str {
         use Problem::*;
         match self.problem {
             ControlCharacter => CONTROL_CHARACTER,
-            Utf8Error { valid_up_to: _, error_len: _ } => UTF8_ERROR,
+            Utf8Error(_) => UTF8_ERROR,
             DoubleQuote => UNEXPECTED_DOUBLE_QUOTE,
+            UnclosedQuote => "Unclosed quoted string",
             EmptyContentLine => EMPTY_CONTENT_LINE,
             Empty => match self.segment {
                 Segment::ParamName => NO_PARAM_NAME,
                 Segment::PropertyName => NO_PROPERTY_NAME,
                 Segment::PropertyValue => NO_PROPERTY_VALUE,
-                _ => unimplemented!(),
+                Segment::ParamValue => "BUG: parameter value can be empty",
             },
             Unterminated => match self.segment {
                 Segment::ParamName => NO_EQUAL_SIGN,
                 Segment::PropertyName => NO_COLON_OR_SEMICOLON,
                 Segment::ParamValue => NO_COMMA_ETC,
-                _ => unimplemented!(),
+                Segment::PropertyValue => "BUG: property value should never have this problem",
             },
         }
     }
+    #[must_use]
     pub fn is_utf8_error(&self) -> bool {
-        matches!(self.problem, Problem::Utf8Error { valid_up_to: _, error_len: _ })
+        matches!(self.problem, Problem::Utf8Error(_))
     }
+    #[must_use]
     pub fn is_control_char_error(&self) -> bool {
         matches!(self.problem, Problem::ControlCharacter)
     }
