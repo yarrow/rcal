@@ -1,8 +1,7 @@
 #![allow(clippy::pedantic)]
 use bstr::BString;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use rcal::preparse::with_regex::regex_preparse;
-use rcal::preparse::{Prop, preparse};
+use rcal::preparse::{Prop, preparse, regex_preparse};
 use rcal::unfolded::BufReadContent;
 
 fn discard(stuff: &Prop) -> u8 {

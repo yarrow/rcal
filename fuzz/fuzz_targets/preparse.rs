@@ -2,8 +2,8 @@
 
 use bstr::ByteSlice;
 use libfuzzer_sys::fuzz_target;
-use rcal::preparse::preparse;
-use rcal::preparse::with_regex::regex_preparse;
+use rcal::preparse;
+use rcal::regex_preparse;
 
 fuzz_target!(|data: &[u8]| {
     // fuzzed code goes here

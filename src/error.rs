@@ -10,15 +10,6 @@ pub enum CalendarError {
     Name(#[from] NameError),
 }
 
-#[derive(Error, Debug)]
-pub enum XPreparseError {
-    #[error(transparent)]
-    Utf8(#[from] std::str::Utf8Error),
-    #[error("ASCII Control Character at column {0}")]
-    ControlCharacter(usize),
-    #[error("Error at column {valid_up_to}: {reason}")]
-    LineError { reason: &'static str, valid_up_to: usize },
-}
 pub type NameResult<T> = Result<T, NameError>;
 
 #[derive(Error, Debug)]
@@ -49,6 +40,11 @@ pub struct PreparseError {
     pub(crate) problem: Problem,
     pub(crate) valid_up_to: usize,
 }
+pub(crate) const EMPTY_CONTENT_LINE: PreparseError = PreparseError {
+    segment: Segment::PropertyName,
+    problem: Problem::EmptyContentLine,
+    valid_up_to: 0,
+};
 impl PreparseError {
     #[must_use]
     pub fn reason(&self) -> &'static str {
@@ -58,7 +54,7 @@ impl PreparseError {
             Utf8Error(_) => UTF8_ERROR,
             DoubleQuote => UNEXPECTED_DOUBLE_QUOTE,
             UnclosedQuote => "Unclosed quoted string",
-            EmptyContentLine => EMPTY_CONTENT_LINE,
+            EmptyContentLine => "Empty content line",
             Empty => match self.segment {
                 Segment::ParamName => NO_PARAM_NAME,
                 Segment::PropertyName => NO_PROPERTY_NAME,
@@ -84,7 +80,6 @@ impl PreparseError {
 }
 pub(crate) const CONTROL_CHARACTER: &str =
     "ASCII control characters are not allowed, except tab (\\t)";
-pub(crate) const EMPTY_CONTENT_LINE: &str = "Empty content line";
 pub(crate) const NO_COLON_OR_SEMICOLON: &str =
     "Property name must be followed by a colon (:) or a semicolon (;)";
 pub(crate) const NO_COMMA_ETC: &str =

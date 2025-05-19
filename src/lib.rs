@@ -13,5 +13,5 @@ pub(crate) use error::{NameError, NameResult};
 pub mod names;
 pub mod parameter;
 pub mod preparse;
-pub use preparse::with_regex;
+pub use preparse::{preparse, regex_preparse};
 pub mod unfolded;

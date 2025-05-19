@@ -1,4 +1,4 @@
-use crate::error::{PreparseError, Problem, Segment};
+use crate::error::{EMPTY_CONTENT_LINE, PreparseError, Problem, Segment};
 use regex::bytes::Regex;
 use std::{mem, str, sync::LazyLock};
 
@@ -13,28 +13,12 @@ static QUOTED: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"\A"[^\x00-\x08\x0A-\x1F\x7F"]*"#).unwrap());
 
 pub fn regex_preparse(v: &[u8]) -> Result<Prop, PreparseError> {
-    use Problem::*;
-    #[allow(clippy::cast_possible_truncation)]
+    if v.is_empty() {
+        return Err(EMPTY_CONTENT_LINE);
+    }
     match pre_preparse(v) {
         Ok(value) => Ok(value),
-        Err(mut err) => {
-            if v.is_empty() {
-                err.problem = EmptyContentLine;
-            } else if err.valid_up_to < v.len() {
-                let byte = v[err.valid_up_to];
-                if byte.is_ascii_control() && byte != b'\t' {
-                    err.problem = ControlCharacter;
-                } else if byte > 127 {
-                    let rest = &v[err.valid_up_to..];
-                    if let Err(utf) = str::from_utf8(rest) {
-                        if utf.valid_up_to() == 0 {
-                            err.problem = Utf8Error(utf.error_len().map(|len| len as u8));
-                        }
-                    }
-                }
-            }
-            Err(err)
-        }
+        Err(err) => super::diagnose_character_errors(err, v),
     }
 }
 fn pre_preparse(mut v: &[u8]) -> Result<Prop, PreparseError> {

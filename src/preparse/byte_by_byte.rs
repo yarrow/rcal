@@ -1,59 +1,35 @@
-//! Operations related to RFC 5545 validation.
-use crate::error::{PreparseError, Problem, Segment};
+use super::{LocStr, Param, Prop, diagnose_character_errors};
+use crate::error::{EMPTY_CONTENT_LINE, PreparseError, Problem, Segment};
 use std::{mem, str};
-pub mod with_regex;
-
-/// A located `str`: a substring of a larger string, along with its location in that string.
-#[derive(Debug, Default, Clone, PartialEq)]
-pub struct LocStr<'a> {
-    pub loc: usize,
-    pub(crate) val: &'a str,
-}
-#[derive(Debug, Clone, PartialEq)]
-pub struct Param<'a> {
-    pub(crate) name: LocStr<'a>,
-    pub(crate) values: Vec<LocStr<'a>>,
-}
-#[derive(Debug, Clone, PartialEq)]
-pub struct Prop<'a> {
-    pub name: LocStr<'a>,
-    pub(crate) parameters: Vec<Param<'a>>,
-    pub(crate) value: LocStr<'a>,
-}
-
-// Content lines must be UTF8 and contain no ASCII control characters. We give those requirements
-// precedence over any other parsing errors.
-fn detect_utf8_error(mut err: PreparseError, v: &[u8]) -> Result<Prop, PreparseError> {
-    // If the position where we stopped parsing is the start of bad UTF8, report that as our `problem`
-    let bad_place = err.valid_up_to;
-    if bad_place < v.len() && v[bad_place] >= 128 {
-        let remaining = &v[bad_place..];
-        #[allow(clippy::cast_possible_truncation)]
-        if let Err(utf8) = str::from_utf8(remaining) {
-            if utf8.valid_up_to() == 0 {
-                err.problem = Problem::Utf8Error(utf8.error_len().map(|len| len as u8));
-            }
-        }
-    }
-    Err(err)
-}
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum State {
     ParamName,
     StartParamValue,
     ParamText,
     ParamQuoted,
-    Value,
-    NonAscii,
+    PropertyValue,
+    PropertyName,
+}
+fn segment_of(state: State) -> Segment {
+    match state {
+        State::ParamName => Segment::ParamName,
+        State::StartParamValue | State::ParamText | State::ParamQuoted => Segment::ParamValue,
+        State::PropertyValue => Segment::PropertyValue,
+        State::PropertyName => Segment::PropertyName,
+    }
 }
 #[allow(
     clippy::unnested_or_patterns,
     clippy::missing_panics_doc,
     clippy::too_many_lines,
-    clippy::cast_possible_wrap,
-    non_contiguous_range_endpoints
+    clippy::cast_possible_wrap
 )]
 pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
+    if v.is_empty() {
+        return Err(EMPTY_CONTENT_LINE);
+    }
+    use Problem::*;
+    use State::*;
     // INVARIANT: `v[start..index]` is a valid UTF8 string. (Implies `start <= index && index <= v.len()`)
     //
     // We only modify `start` by setting it to the current value of `index`, which establishes
@@ -84,59 +60,55 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
         }};
     }
 
-    let mut segment = Segment::PropertyName;
-    let mut state = State::NonAscii; // Anything that's not `Value` or `ParamName`
+    let mut state = PropertyName;
     //
     // Return an error: the input doesn't correspond to the basic grammar in RFC 5545 § 3.1
     macro_rules! rfc_err {
         ($problem: expr) => {
-            return Err(PreparseError { segment, problem: $problem, valid_up_to: index })
+            return Err(PreparseError {
+                segment: segment_of(state),
+                problem: $problem,
+                valid_up_to: index,
+            })
         };
     }
 
-    macro_rules! check_for_utf8_error {
-        ($problem: expr) => {
-            return detect_utf8_error(
-                PreparseError { segment, problem: $problem, valid_up_to: index },
+    macro_rules! check_for_character_error {
+        ($problem: expr) => {{
+            let problem = if $problem == Unterminated && index == start { Empty } else { $problem };
+            return diagnose_character_errors(
+                PreparseError { segment: segment_of(state), problem, valid_up_to: index },
                 v,
-            )
-        };
+            );
+        }};
     }
 
     let len = v.len();
-    if len == 0 {
-        rfc_err!(Problem::EmptyContentLine);
-    }
     while index < len {
         match v[index] {
             b'-' | b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' => index += 1, // Maintains the invariant since
             b':' => {
-                segment = Segment::ParamValue;
-                state = State::Value;
+                state = PropertyValue;
                 break;
             }
             b';' => {
-                segment = Segment::ParamName;
-                state = State::ParamName;
+                state = ParamName;
                 break;
             }
-            ..b'\t' | 10..b' ' | 127 => {
-                rfc_err!(Problem::ControlCharacter)
-            }
-            _ => check_for_utf8_error!(if index == 0 {
-                Problem::Empty
-            } else {
-                Problem::Unterminated
-            }),
+            _ => check_for_character_error!(Unterminated),
         }
     }
     if index == 0 {
-        segment = Segment::PropertyName;
-        check_for_utf8_error!(Problem::Empty);
+        state = PropertyName;
     }
-    if segment == Segment::PropertyName {
-        check_for_utf8_error!(if index == 0 { Problem::Empty } else { Problem::Unterminated });
+    if state == PropertyName {
+        check_for_character_error!(Unterminated);
     }
+
+    // At this point, we've either successfully parsed the property, or we've returned an error because
+    // we couldn't. So we can reuse `PropertyName` to mean "please parse some UTF8 bytes"
+    const NON_ASCII: State = PropertyName;
+
     let mut param_name = LocStr::default();
     let mut param_values = Vec::<LocStr>::new();
     let mut parameters = Vec::<Param<'a>>::new();
@@ -187,73 +159,62 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
             () => {
                 if this_byte >= 128 {
                     old_state = state;
-                    state = State::NonAscii;
+                    state = NON_ASCII;
                     continue 'outer;
                 }
             };
         }
 
         match state {
-            State::ParamName => {
-                segment = Segment::ParamName;
+            ParamName => {
                 finish_parameter!();
                 loop {
                     match this_byte {
                         b'-' | b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' => next_byte_or_finish!(),
                         b'=' => {
                             if index == start {
-                                rfc_err!(Problem::Empty)
+                                rfc_err!(Empty)
                             }
                             param_name = loc_str!(start, index);
-                            change_state_to!(State::StartParamValue);
+                            change_state_to!(StartParamValue);
                         }
-                        ..b'\t' | 10..b' ' | 127 => {
-                            rfc_err!(Problem::ControlCharacter)
-                        }
-                        _ => {
-                            let problem =
-                                if index == start { Problem::Empty } else { Problem::Unterminated };
-                            check_for_utf8_error!(problem);
-                        }
+                        _ => check_for_character_error!(Unterminated),
                     }
                 }
             }
-            State::StartParamValue => {
-                segment = Segment::ParamValue;
+            StartParamValue => {
                 if v[index] == b'"' {
                     index += 1;
-                    state = State::ParamQuoted;
+                    state = ParamQuoted;
                     pending_quote = true;
                 } else {
-                    state = State::ParamText;
+                    state = ParamText;
                 }
             }
-            State::ParamText => loop {
+            ParamText => loop {
                 handle_non_ascii!();
                 match this_byte {
                     b'\t' | b' '..b'"' | b'#'..b',' | b'-'..b':' | b'<'..127 => {
                         next_byte_or_finish!();
                     }
-                    b'"' => rfc_err!(Problem::DoubleQuote),
+                    b'"' => rfc_err!(DoubleQuote),
                     b',' => {
                         param_values.push(loc_str!(start, index));
-                        change_state_to!(State::StartParamValue);
+                        change_state_to!(StartParamValue);
                     }
                     b':' => {
                         param_values.push(loc_str!(start, index));
                         finish_parameter!();
-                        segment = Segment::PropertyValue;
-                        change_state_to!(State::Value);
+                        change_state_to!(PropertyValue);
                     }
                     b';' => {
                         param_values.push(loc_str!(start, index));
-                        segment = Segment::ParamName;
-                        change_state_to!(State::ParamName);
+                        change_state_to!(ParamName);
                     }
-                    _ => rfc_err!(Problem::ControlCharacter),
+                    _ => rfc_err!(ControlCharacter),
                 }
             },
-            State::ParamQuoted => loop {
+            ParamQuoted => loop {
                 handle_non_ascii!();
                 match this_byte {
                     b'\t' | b' '..b'"' | b'#'..127 => next_byte_or_finish!(),
@@ -263,35 +224,30 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
                         param_values.push(loc_str!(start, index));
                         next_byte_or_finish!();
                         match this_byte {
-                            b',' => change_state_to!(State::StartParamValue),
+                            b',' => change_state_to!(StartParamValue),
                             b':' => {
                                 finish_parameter!();
-                                segment = Segment::ParamValue;
-                                change_state_to!(State::Value)
+                                change_state_to!(PropertyValue)
                             }
-                            b';' => change_state_to!(State::ParamName),
-                            ..b'\t' | 10..b' ' | 127 => {
-                                rfc_err!(Problem::ControlCharacter)
-                            }
-                            b'"' => rfc_err!(Problem::DoubleQuote),
-                            _ => check_for_utf8_error!(Problem::Unterminated),
+                            b';' => change_state_to!(ParamName),
+                            b'"' => rfc_err!(DoubleQuote),
+                            _ => check_for_character_error!(Unterminated),
                         }
                     }
-                    _ => rfc_err!(Problem::ControlCharacter),
+                    _ => rfc_err!(ControlCharacter),
                 }
             },
-            State::Value => {
-                segment = Segment::PropertyValue;
+            PropertyValue => {
                 finish_parameter!();
                 loop {
                     handle_non_ascii!();
                     match this_byte {
                         b'\t' | b' '..127 => next_byte_or_finish!(),
-                        _ => rfc_err!(Problem::ControlCharacter),
+                        _ => rfc_err!(ControlCharacter),
                     }
                 }
             }
-            State::NonAscii => {
+            NON_ASCII => {
                 loop {
                     state = old_state; // Return from whence we came at the end of the loop
 
@@ -301,8 +257,8 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
                     macro_rules! utf8_err {
                         ($error_len: expr) => {
                             return Err(PreparseError {
-                                segment,
-                                problem: Problem::Utf8Error($error_len),
+                                segment: segment_of(state),
+                                problem: Utf8Error($error_len),
                                 valid_up_to: old_offset,
                             })
                         };
@@ -379,26 +335,29 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
             }
         }
     }
-    debug_assert!(state != State::Value || index == v.len());
+    debug_assert!(state != PropertyValue || index == v.len());
 
     match state {
-        State::Value => Ok(Prop { name: property_name, parameters, value: loc_str!(start, index) }),
-        State::NonAscii => panic!("BUG: should be impossible to exit loop with state == NonAscii"),
-        State::ParamName => {
-            segment = Segment::ParamName;
-            if index == start { rfc_err!(Problem::Empty) } else { rfc_err!(Problem::Unterminated) }
+        PropertyValue => {
+            Ok(Prop { name: property_name, parameters, value: loc_str!(start, index) })
         }
-        State::ParamQuoted => {
+        NON_ASCII => {
+            panic!("BUG: should be impossible to exit loop with state == NON_ASCII")
+        }
+        ParamName => {
+            check_for_character_error!(Unterminated);
+        }
+        ParamQuoted => {
             if pending_quote {
-                rfc_err!(Problem::UnclosedQuote)
+                rfc_err!(UnclosedQuote)
             } else {
-                segment = Segment::PropertyValue;
-                rfc_err!(Problem::Empty);
+                state = PropertyValue;
+                rfc_err!(Empty);
             }
         }
-        State::StartParamValue | State::ParamText => {
-            segment = Segment::PropertyValue;
-            rfc_err!(Problem::Empty)
+        StartParamValue | ParamText => {
+            state = PropertyValue;
+            rfc_err!(Empty)
         }
     }
 }
@@ -432,6 +391,3 @@ const UTF8_CHAR_WIDTH: &[u8; 256] = &[
 fn utf8_char_width(b: u8) -> usize {
     UTF8_CHAR_WIDTH[b as usize] as usize
 }
-
-#[cfg(test)]
-mod tests;
