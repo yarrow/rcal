@@ -44,12 +44,11 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
     let mut index = 0;
     let mut start = index;
 
-    // Given the invariant, `loc_str!(start, index)` always produces a `LocStr{loc, val}` where
-    // `v[loc]` is the start of a UTF8 code point and `val` is a valid UTF8 string — again as long
-    // as we don't call `loc_str!(start, index)` in the middle of scanning a multi-byte UTF8 code
-    // point.
-    //
-    // And we never call `loc_str!` except as `loc_str!(start, index)`
+    // We only call `loc_str!` as `loc_str!(start, index)` — which is safe because given the
+    // invariant, `loc_str!(start, index)` always produces a `LocStr{loc, val}` where `v[loc]`
+    // is the start of a UTF8 code point and `val` is a valid UTF8 string. (Again, this is true
+    // only as long as we don't call `loc_str!(start, index)` in the middle of scanning a
+    // multi-byte UTF8 code point.)
     macro_rules! loc_str {
         ($start: ident, $index: ident) => {{
             debug_assert!(str::from_utf8(&v[$start..$index]).is_ok());
@@ -248,9 +247,8 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
                 }
             }
             NON_ASCII => {
+                state = old_state; // Return from whence we came at the end of the loop
                 loop {
-                    state = old_state; // Return from whence we came at the end of the loop
-
                     // Taken from `run_utf8_validation` in
                     // lib/rustlib/src/rust/library/core/src/str/validations.rs
                     let old_offset = index;
