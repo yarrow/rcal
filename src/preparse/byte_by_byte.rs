@@ -8,21 +8,20 @@ enum State {
     ParamText,
     ParamQuoted,
     PropertyValue,
-    PropertyName,
 }
 fn segment_of(state: State) -> Segment {
     match state {
         State::ParamName => Segment::ParamName,
         State::StartParamValue | State::ParamText | State::ParamQuoted => Segment::ParamValue,
         State::PropertyValue => Segment::PropertyValue,
-        State::PropertyName => Segment::PropertyName,
     }
 }
 #[allow(
     clippy::unnested_or_patterns,
     clippy::missing_panics_doc,
     clippy::too_many_lines,
-    clippy::cast_possible_wrap
+    clippy::cast_possible_wrap,
+    non_contiguous_range_endpoints
 )]
 pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
     if v.is_empty() {
@@ -59,8 +58,41 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
         }};
     }
 
-    let mut state = PropertyName;
-    //
+    macro_rules! check_for_character_error {
+        ($segment: expr, $problem: expr) => {{
+            let problem = if $problem == Unterminated && index == start { Empty } else { $problem };
+            return diagnose_character_errors(
+                PreparseError { segment: $segment, problem, valid_up_to: index },
+                v,
+            );
+        }};
+    }
+
+    let mut state = None;
+
+    let len = v.len();
+    while index < len {
+        match v[index] {
+            b'-' | b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' => index += 1, // Maintains the invariant since
+            b':' => {
+                state = Some(PropertyValue);
+                break;
+            }
+            b';' => {
+                state = Some(ParamName);
+                break;
+            }
+            _ => check_for_character_error!(Segment::PropertyName, Unterminated),
+        }
+    }
+    if index == 0 {
+        state = None;
+    }
+    let mut state = match state {
+        None => check_for_character_error!(Segment::PropertyName, Unterminated),
+        Some(actual_state) => actual_state,
+    };
+
     // Return an error: the input doesn't correspond to the basic grammar in RFC 5545 § 3.1
     macro_rules! rfc_err {
         ($problem: expr) => {
@@ -71,42 +103,6 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
             })
         };
     }
-
-    macro_rules! check_for_character_error {
-        ($problem: expr) => {{
-            let problem = if $problem == Unterminated && index == start { Empty } else { $problem };
-            return diagnose_character_errors(
-                PreparseError { segment: segment_of(state), problem, valid_up_to: index },
-                v,
-            );
-        }};
-    }
-
-    let len = v.len();
-    while index < len {
-        match v[index] {
-            b'-' | b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' => index += 1, // Maintains the invariant since
-            b':' => {
-                state = PropertyValue;
-                break;
-            }
-            b';' => {
-                state = ParamName;
-                break;
-            }
-            _ => check_for_character_error!(Unterminated),
-        }
-    }
-    if index == 0 {
-        state = PropertyName;
-    }
-    if state == PropertyName {
-        check_for_character_error!(Unterminated);
-    }
-
-    // At this point, we've either successfully parsed the property, or we've returned an error because
-    // we couldn't. So we can reuse `PropertyName` to mean "please parse some UTF8 bytes"
-    const NON_ASCII: State = PropertyName;
 
     let mut param_name = LocStr::default();
     let mut param_values = Vec::<LocStr>::new();
@@ -125,7 +121,6 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
             }
         };
     }
-    let mut old_state = state;
     let mut pending_quote = false;
     'outer: while index < len {
         let mut this_byte = v[index];
@@ -151,19 +146,6 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
             }};
         }
 
-        // If the current byte isn't ASCII, ensure that we handle that (with code stolen from the
-        // Rust compiler), while remembering the current state in order to return to it. In effect,
-        // perform a manual subroutine call.
-        macro_rules! handle_non_ascii {
-            () => {
-                if this_byte >= 128 {
-                    old_state = state;
-                    state = NON_ASCII;
-                    continue 'outer;
-                }
-            };
-        }
-
         match state {
             ParamName => {
                 finish_parameter!();
@@ -177,7 +159,7 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
                             param_name = loc_str!(start, index);
                             change_state_to!(StartParamValue);
                         }
-                        _ => check_for_character_error!(Unterminated),
+                        _ => check_for_character_error!(segment_of(ParamName), Unterminated),
                     }
                 }
             }
@@ -191,7 +173,6 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
                 }
             }
             ParamText => loop {
-                handle_non_ascii!();
                 match this_byte {
                     b'\t' | b' '..b'"' | b'#'..b',' | b'-'..b':' | b'<'..127 => {
                         next_byte_or_finish!();
@@ -210,11 +191,14 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
                         param_values.push(loc_str!(start, index));
                         change_state_to!(ParamName);
                     }
+                    128.. => {
+                        index = handle_non_ascii(v, state, index)?;
+                        if index < len { this_byte = v[index] } else { break 'outer }
+                    }
                     _ => rfc_err!(ControlCharacter),
                 }
             },
             ParamQuoted => loop {
-                handle_non_ascii!();
                 match this_byte {
                     b'\t' | b' '..b'"' | b'#'..127 => next_byte_or_finish!(),
                     b'"' => {
@@ -230,8 +214,12 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
                             }
                             b';' => change_state_to!(ParamName),
                             b'"' => rfc_err!(DoubleQuote),
-                            _ => check_for_character_error!(Unterminated),
+                            _ => check_for_character_error!(segment_of(ParamQuoted), Unterminated),
                         }
+                    }
+                    128.. => {
+                        index = handle_non_ascii(v, state, index)?;
+                        if index < len { this_byte = v[index] } else { break 'outer }
                     }
                     _ => rfc_err!(ControlCharacter),
                 }
@@ -239,95 +227,13 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
             PropertyValue => {
                 finish_parameter!();
                 loop {
-                    handle_non_ascii!();
                     match this_byte {
                         b'\t' | b' '..127 => next_byte_or_finish!(),
+                        128.. => {
+                            index = handle_non_ascii(v, state, index)?;
+                            if index < len { this_byte = v[index] } else { break 'outer }
+                        }
                         _ => rfc_err!(ControlCharacter),
-                    }
-                }
-            }
-            NON_ASCII => {
-                state = old_state; // Return from whence we came at the end of the loop
-                loop {
-                    // Taken from `run_utf8_validation` in
-                    // lib/rustlib/src/rust/library/core/src/str/validations.rs
-                    let old_offset = index;
-                    macro_rules! utf8_err {
-                        ($error_len: expr) => {
-                            return Err(PreparseError {
-                                segment: segment_of(state),
-                                problem: Utf8Error($error_len),
-                                valid_up_to: old_offset,
-                            })
-                        };
-                    }
-                    macro_rules! next {
-                        () => {{
-                            index += 1;
-                            // we needed data, but there was none: error!
-                            if index >= len {
-                                utf8_err!(None)
-                            }
-                            v[index]
-                        }};
-                    }
-
-                    let w = utf8_char_width(this_byte);
-                    // 2-byte encoding is for codepoints  \u{0080} to  \u{07ff}
-                    //        first  C2 80        last DF BF
-                    // 3-byte encoding is for codepoints  \u{0800} to  \u{ffff}
-                    //        first  E0 A0 80     last EF BF BF
-                    //   excluding surrogates codepoints  \u{d800} to  \u{dfff}
-                    //               ED A0 80 to       ED BF BF
-                    // 4-byte encoding is for codepoints \u{10000} to \u{10ffff}
-                    //        first  F0 90 80 80  last F4 8F BF BF
-                    //
-                    // Use the UTF-8 syntax from the RFC
-                    //
-                    // https://tools.ietf.org/html/rfc3629
-                    // UTF8-1      = %x00-7F
-                    // UTF8-2      = %xC2-DF UTF8-tail
-                    // UTF8-3      = %xE0 %xA0-BF UTF8-tail / %xE1-EC 2( UTF8-tail ) /
-                    //               %xED %x80-9F UTF8-tail / %xEE-EF 2( UTF8-tail )
-                    // UTF8-4      = %xF0 %x90-BF 2( UTF8-tail ) / %xF1-F3 3( UTF8-tail ) /
-                    //               %xF4 %x80-8F 2( UTF8-tail )
-                    match w {
-                        2 => {
-                            if next!() as i8 >= -64 {
-                                utf8_err!(Some(1))
-                            }
-                        }
-                        3 => {
-                            match (this_byte, next!()) {
-                                (0xE0, 0xA0..=0xBF)
-                                | (0xE1..=0xEC, 0x80..=0xBF)
-                                | (0xED, 0x80..=0x9F)
-                                | (0xEE..=0xEF, 0x80..=0xBF) => {}
-                                _ => utf8_err!(Some(1)),
-                            }
-                            if next!() as i8 >= -64 {
-                                utf8_err!(Some(2))
-                            }
-                        }
-                        4 => {
-                            match (this_byte, next!()) {
-                                (0xF0, 0x90..=0xBF)
-                                | (0xF1..=0xF3, 0x80..=0xBF)
-                                | (0xF4, 0x80..=0x8F) => {}
-                                _ => utf8_err!(Some(1)),
-                            }
-                            if next!() as i8 >= -64 {
-                                utf8_err!(Some(2))
-                            }
-                            if next!() as i8 >= -64 {
-                                utf8_err!(Some(3))
-                            }
-                        }
-                        _ => utf8_err!(Some(1)),
-                    }
-                    next_byte_or_finish!();
-                    if this_byte < 128 {
-                        break;
                     }
                 }
             }
@@ -339,11 +245,8 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
         PropertyValue => {
             Ok(Prop { name: property_name, parameters, value: loc_str!(start, index) })
         }
-        NON_ASCII => {
-            panic!("BUG: should be impossible to exit loop with state == NON_ASCII")
-        }
         ParamName => {
-            check_for_character_error!(Unterminated);
+            check_for_character_error!(segment_of(ParamName), Unterminated);
         }
         ParamQuoted => {
             if pending_quote {
@@ -358,6 +261,102 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
             rfc_err!(Empty)
         }
     }
+}
+// Modeled after `run_utf8_validation` in
+// lib/rustlib/src/rust/library/core/src/str/validations.rs
+// Panics if `index >= v.len()`
+#[allow(non_contiguous_range_endpoints)]
+fn handle_non_ascii(v: &[u8], state: State, mut index: usize) -> Result<usize, PreparseError> {
+    let len = v.len();
+    while index < len {
+        let old_offset = index;
+        macro_rules! utf8_err {
+            ($error_len: expr) => {
+                return Err(PreparseError {
+                    segment: segment_of(state),
+                    problem: Problem::Utf8Error($error_len),
+                    valid_up_to: old_offset,
+                })
+            };
+        }
+        macro_rules! next {
+            () => {{
+                index += 1;
+                // we needed data, but there was none: error!
+                if index >= len {
+                    utf8_err!(None)
+                }
+                v[index]
+            }};
+        }
+
+        let this_byte = v[index];
+        match this_byte {
+            b'\t' | b' '..b'"' | b'#'..b',' | b'-'..b':' | b'<'..127 => {
+                index += 1;
+                continue;
+            }
+
+            128.. => {
+                let w = utf8_char_width(this_byte);
+                // 2-byte encoding is for codepoints  \u{0080} to  \u{07ff}
+                //        first  C2 80        last DF BF
+                // 3-byte encoding is for codepoints  \u{0800} to  \u{ffff}
+                //        first  E0 A0 80     last EF BF BF
+                //   excluding surrogates codepoints  \u{d800} to  \u{dfff}
+                //               ED A0 80 to       ED BF BF
+                // 4-byte encoding is for codepoints \u{10000} to \u{10ffff}
+                //        first  F0 90 80 80  last F4 8F BF BF
+                //
+                // Use the UTF-8 syntax from the RFC
+                //
+                // https://tools.ietf.org/html/rfc3629
+                // UTF8-1      = %x00-7F
+                // UTF8-2      = %xC2-DF UTF8-tail
+                // UTF8-3      = %xE0 %xA0-BF UTF8-tail / %xE1-EC 2( UTF8-tail ) /
+                //               %xED %x80-9F UTF8-tail / %xEE-EF 2( UTF8-tail )
+                // UTF8-4      = %xF0 %x90-BF 2( UTF8-tail ) / %xF1-F3 3( UTF8-tail ) /
+                //               %xF4 %x80-8F 2( UTF8-tail )
+                match w {
+                    2 => {
+                        if next!() as i8 >= -64 {
+                            utf8_err!(Some(1))
+                        }
+                    }
+                    3 => {
+                        match (this_byte, next!()) {
+                            (0xE0, 0xA0..=0xBF)
+                            | (0xE1..=0xEC, 0x80..=0xBF)
+                            | (0xED, 0x80..=0x9F)
+                            | (0xEE..=0xEF, 0x80..=0xBF) => {}
+                            _ => utf8_err!(Some(1)),
+                        }
+                        if next!() as i8 >= -64 {
+                            utf8_err!(Some(2))
+                        }
+                    }
+                    4 => {
+                        match (this_byte, next!()) {
+                            (0xF0, 0x90..=0xBF)
+                            | (0xF1..=0xF3, 0x80..=0xBF)
+                            | (0xF4, 0x80..=0x8F) => {}
+                            _ => utf8_err!(Some(1)),
+                        }
+                        if next!() as i8 >= -64 {
+                            utf8_err!(Some(2))
+                        }
+                        if next!() as i8 >= -64 {
+                            utf8_err!(Some(3))
+                        }
+                    }
+                    _ => utf8_err!(Some(1)),
+                }
+                index += 1;
+            }
+            _ => break,
+        }
+    }
+    Ok(index)
 }
 // Taken from lib/rustlib/src/rust/library/core/src/str/validations.rs
 // (which itself credits ietf.org in the commented link)
