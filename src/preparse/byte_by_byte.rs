@@ -1,62 +1,56 @@
+// RFC 5545 has multiple cases where a "good" ASCII character range has a one-character gap
+#![allow(non_contiguous_range_endpoints)]
 use super::{LocStr, Param, Prop, diagnose_character_errors};
 use crate::error::{EMPTY_CONTENT_LINE, PreparseError, Problem, Segment};
 use std::{mem, str};
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum State {
-    ParamName,
-    StartParamValue,
-    ParamText,
-    ParamQuoted,
-    PropertyValue,
+// Return an error: the input doesn't correspond to the basic grammar in RFC 5545 § 3.1
+macro_rules! rfc_err {
+    ($segment: expr, $problem: expr, $index: ident) => {
+        return Err(PreparseError { segment: $segment, problem: $problem, valid_up_to: $index })
+    };
 }
-fn segment_of(state: State) -> Segment {
-    match state {
-        State::ParamName => Segment::ParamName,
-        State::StartParamValue | State::ParamText | State::ParamQuoted => Segment::ParamValue,
-        State::PropertyValue => Segment::PropertyValue,
+
+fn finish_parameter<'a>(
+    parameters: &mut Vec<Param<'a>>,
+    name: &mut LocStr<'a>,
+    values: &mut Vec<LocStr<'a>>,
+) {
+    if !name.val.is_empty() {
+        parameters.push(Param { name: mem::take(name), values: mem::take(values) });
     }
 }
-#[allow(
-    clippy::unnested_or_patterns,
-    clippy::missing_panics_doc,
-    clippy::too_many_lines,
-    clippy::cast_possible_wrap,
-    non_contiguous_range_endpoints
-)]
+
+//SAFETY: `0 <= start && start <= index && index <= v.len()` and `v[start..index]` is valid UTF8
+unsafe fn loc_str(v: &[u8], start: usize, index: usize) -> LocStr<'_> {
+    debug_assert!(str::from_utf8(&v[start..index]).is_ok());
+    LocStr { loc: start, val: unsafe { str::from_utf8_unchecked(v.get_unchecked(start..index)) } }
+}
+#[allow(clippy::too_many_lines)]
 pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
     if v.is_empty() {
         return Err(EMPTY_CONTENT_LINE);
     }
     use Problem::*;
-    use State::*;
-    // INVARIANT: `v[start..index]` is a valid UTF8 string. (Implies `start <= index && index <= v.len()`)
-    //
-    // We only modify `start` by setting it to the current value of `index`, which establishes
-    // the invariant (since `v[start..index]` is then the empty string).
-    //
-    // Since the concatenation of two valid UTF8 strings is also valid, if `v[index]`
-    // is ASCII we can increment `index` while maintaining the invariant. For a multi-byte
-    // UTF8 code point we may briefly break the invariant while checking that it is indeed
-    // a valid code point, but if it's not valid we'll return an error and if it is valid
-    // we'll restore the invariant by setting `index` to the byte past the end of the code
-    // point.
-    let mut index = 0;
-    let mut start = index;
 
-    // We only call `loc_str!` as `loc_str!(start, index)` — which is safe because given the
-    // invariant, `loc_str!(start, index)` always produces a `LocStr{loc, val}` where `v[loc]`
+    // INVARIANT: `v[start..index]` is a valid UTF8 string. (Implies `start <= index && index <= v.len()`)
+    // (The invariant implies that `loc_str(v, start, index)` is safe, and that is the only way we
+    // call `loc_str`.)
+    //
+    // If `f` is one of the following functions:
+    //  * rfc5545_name
+    //  * param_text
+    //  * param_quoted
+    //  * property_value
+    //  * handle_non_ascii
+    //  We have `v[start..f(v, start)]` is a valid UTF8 string (assuming `start < v.len()`).
+    //
+    let (mut start, mut index) = (0, rfc5545_name(v, 0));
+
+    // We only call `loc_str!` as `unsafe { loc_str(v, start, index)` — which is safe because given the
+    // invariant, `unsafe { loc_str(start, index)` always produces a `LocStr{loc, val}` where `v[loc]`
     // is the start of a UTF8 code point and `val` is a valid UTF8 string. (Again, this is true
-    // only as long as we don't call `loc_str!(start, index)` in the middle of scanning a
+    // only as long as we don't call `unsafe { loc_str(start, index)` in the middle of scanning a
     // multi-byte UTF8 code point.)
-    macro_rules! loc_str {
-        ($start: ident, $index: ident) => {{
-            debug_assert!(str::from_utf8(&v[$start..$index]).is_ok());
-            LocStr {
-                loc: $start,
-                val: unsafe { str::from_utf8_unchecked(v.get_unchecked($start..$index)) },
-            }
-        }};
-    }
 
     macro_rules! check_for_character_error {
         ($segment: expr, $problem: expr) => {{
@@ -68,212 +62,147 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
         }};
     }
 
-    let mut state = None;
-
+    let mut segment = Segment::PropertyName;
     let len = v.len();
-    while index < len {
-        match v[index] {
-            b'-' | b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' => index += 1, // Maintains the invariant since
-            b':' => {
-                state = Some(PropertyValue);
-                break;
-            }
-            b';' => {
-                state = Some(ParamName);
-                break;
-            }
-            _ => check_for_character_error!(Segment::PropertyName, Unterminated),
-        }
-    }
-    if index == 0 {
-        state = None;
-    }
-    let mut state = match state {
-        None => check_for_character_error!(Segment::PropertyName, Unterminated),
-        Some(actual_state) => actual_state,
-    };
-
-    // Return an error: the input doesn't correspond to the basic grammar in RFC 5545 § 3.1
-    macro_rules! rfc_err {
-        ($problem: expr) => {
-            return Err(PreparseError {
-                segment: segment_of(state),
-                problem: $problem,
-                valid_up_to: index,
-            })
-        };
+    if index == 0 || index >= len {
+        check_for_character_error!(Segment::PropertyName, Unterminated)
     }
 
     let mut param_name = LocStr::default();
     let mut param_values = Vec::<LocStr>::new();
     let mut parameters = Vec::<Param<'a>>::new();
-    let property_name = loc_str!(start, index);
-    index += 1;
+    let property_name = unsafe { loc_str(v, start, index) };
 
-    start = index;
-    macro_rules! finish_parameter {
-        () => {
-            if !param_name.val.is_empty() {
-                parameters.push(Param {
-                    name: mem::take(&mut param_name),
-                    values: mem::take(&mut param_values),
-                });
-            }
-        };
-    }
     let mut pending_quote = false;
-    'outer: while index < len {
-        let mut this_byte = v[index];
-
-        // Set `this_byte` to the next byte of `v` or break the 'outer loop if there are none left
-        macro_rules! next_byte_or_finish {
-            () => {{
-                index += 1;
+    'outer: while index < len && v[index] == b';' {
+        finish_parameter(&mut parameters, &mut param_name, &mut param_values);
+        segment = Segment::ParamName;
+        (start, index) = (index + 1, rfc5545_name(v, index + 1));
+        if index >= len {
+            break 'outer;
+        }
+        match v[index] {
+            b'=' => {
+                if index == start {
+                    rfc_err!(Segment::ParamName, Empty, index)
+                }
+                segment = Segment::ParamValue;
+                param_name = unsafe { loc_str(v, start, index) };
+                (start, index) = (index + 1, index + 1);
+            }
+            _ => check_for_character_error!(Segment::ParamName, Unterminated),
+        }
+        while index < len {
+            if v[index] == b'"' {
+                pending_quote = true;
+                (start, index) = (index + 1, param_quoted(v, index + 1)?);
                 if index >= len {
                     break 'outer;
                 }
-                this_byte = v[index];
-            }};
-        }
-        // Discard the next byte by advancing `index`, set `start` to the advanced `index`,
-        // and go to the head of the 'outer loop
-        macro_rules! change_state_to {
-            ($new_state: expr) => {{
-                index += 1;
-                start = index;
-                state = $new_state;
-                continue 'outer;
-            }};
-        }
-
-        match state {
-            ParamName => {
-                finish_parameter!();
-                loop {
-                    match this_byte {
-                        b'-' | b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' => next_byte_or_finish!(),
-                        b'=' => {
-                            if index == start {
-                                rfc_err!(Empty)
-                            }
-                            param_name = loc_str!(start, index);
-                            change_state_to!(StartParamValue);
-                        }
-                        _ => check_for_character_error!(segment_of(ParamName), Unterminated),
-                    }
-                }
-            }
-            StartParamValue => {
-                if v[index] == b'"' {
-                    index += 1;
-                    state = ParamQuoted;
-                    pending_quote = true;
-                } else {
-                    state = ParamText;
-                }
-            }
-            ParamText => loop {
-                match this_byte {
-                    b'\t' | b' '..b'"' | b'#'..b',' | b'-'..b':' | b'<'..127 => {
-                        next_byte_or_finish!();
-                    }
-                    b'"' => rfc_err!(DoubleQuote),
-                    b',' => {
-                        param_values.push(loc_str!(start, index));
-                        change_state_to!(StartParamValue);
-                    }
-                    b':' => {
-                        param_values.push(loc_str!(start, index));
-                        finish_parameter!();
-                        change_state_to!(PropertyValue);
-                    }
-                    b';' => {
-                        param_values.push(loc_str!(start, index));
-                        change_state_to!(ParamName);
-                    }
-                    128.. => {
-                        index = handle_non_ascii(v, state, index)?;
-                        if index < len { this_byte = v[index] } else { break 'outer }
-                    }
-                    _ => rfc_err!(ControlCharacter),
-                }
-            },
-            ParamQuoted => loop {
-                match this_byte {
-                    b'\t' | b' '..b'"' | b'#'..127 => next_byte_or_finish!(),
+                match v[index] {
                     b'"' => {
-                        start += 1;
                         pending_quote = false;
-                        param_values.push(loc_str!(start, index));
-                        next_byte_or_finish!();
-                        match this_byte {
-                            b',' => change_state_to!(StartParamValue),
-                            b':' => {
-                                finish_parameter!();
-                                change_state_to!(PropertyValue)
-                            }
-                            b';' => change_state_to!(ParamName),
-                            b'"' => rfc_err!(DoubleQuote),
-                            _ => check_for_character_error!(segment_of(ParamQuoted), Unterminated),
-                        }
+                        param_values.push(unsafe { loc_str(v, start, index) });
+                        index += 1;
                     }
-                    128.. => {
-                        index = handle_non_ascii(v, state, index)?;
-                        if index < len { this_byte = v[index] } else { break 'outer }
-                    }
-                    _ => rfc_err!(ControlCharacter),
+                    _ => rfc_err!(Segment::ParamValue, ControlCharacter, index),
                 }
-            },
-            PropertyValue => {
-                finish_parameter!();
-                loop {
-                    match this_byte {
-                        b'\t' | b' '..127 => next_byte_or_finish!(),
-                        128.. => {
-                            index = handle_non_ascii(v, state, index)?;
-                            if index < len { this_byte = v[index] } else { break 'outer }
-                        }
-                        _ => rfc_err!(ControlCharacter),
-                    }
-                }
+            } else {
+                index = param_text(v, start)?;
+                param_values.push(unsafe { loc_str(v, start, index) });
+            }
+            if index >= len {
+                break 'outer;
+            }
+            match v[index] {
+                b',' => (index, start) = (index + 1, index + 1),
+                b':' => break 'outer,
+                b';' => break,
+                b'"' => rfc_err!(Segment::ParamValue, DoubleQuote, index),
+                _ => check_for_character_error!(Segment::ParamValue, Unterminated),
             }
         }
     }
-    debug_assert!(state != PropertyValue || index == v.len());
+    if index < len && v[index] == b':' {
+        finish_parameter(&mut parameters, &mut param_name, &mut param_values);
+        segment = Segment::PropertyValue;
+        start = index + 1;
+        index = property_value(v, start)?;
+    }
+    debug_assert!(segment != Segment::PropertyValue || index == v.len());
 
-    match state {
-        PropertyValue => {
-            Ok(Prop { name: property_name, parameters, value: loc_str!(start, index) })
+    match segment {
+        Segment::PropertyValue => {
+            Ok(Prop { name: property_name, parameters, value: unsafe { loc_str(v, start, index) } })
         }
-        ParamName => {
-            check_for_character_error!(segment_of(ParamName), Unterminated);
-        }
-        ParamQuoted => {
+        Segment::PropertyName => check_for_character_error!(Segment::PropertyName, Unterminated),
+        Segment::ParamName => check_for_character_error!(Segment::ParamName, Unterminated),
+        Segment::ParamValue => {
             if pending_quote {
-                rfc_err!(UnclosedQuote)
+                rfc_err!(Segment::ParamValue, UnclosedQuote, index)
             } else {
-                state = PropertyValue;
-                rfc_err!(Empty);
+                rfc_err!(Segment::PropertyValue, Empty, index);
             }
-        }
-        StartParamValue | ParamText => {
-            state = PropertyValue;
-            rfc_err!(Empty)
         }
     }
 }
+
+// SAFETY: `v[j..rfc5545_name(v, j)]`` is a valid UTF8 string because every byte in that range is
+// an ASCII character
+fn rfc5545_name(v: &[u8], mut index: usize) -> usize {
+    let len = v.len();
+    while index < len {
+        match v[index] {
+            b'-' | b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' => index += 1,
+            _ => break,
+        }
+    }
+    index
+}
+
+fn param_text(v: &[u8], mut index: usize) -> Result<usize, PreparseError> {
+    while index < v.len() {
+        match v[index] {
+            b'\t' | b' '..b'"' | b'#'..b',' | b'-'..b':' | b'<'..127 => index += 1,
+            128.. => index = handle_non_ascii(v, Segment::ParamValue, index)?,
+            _ => break,
+        }
+    }
+    Ok(index)
+}
+fn param_quoted(v: &[u8], mut index: usize) -> Result<usize, PreparseError> {
+    while index < v.len() {
+        match v[index] {
+            b'\t' | b' '..b'"' | b'#'..127 => index += 1,
+            128.. => index = handle_non_ascii(v, Segment::ParamValue, index)?,
+            _ => break,
+        }
+    }
+    Ok(index)
+}
+fn property_value(v: &[u8], mut index: usize) -> Result<usize, PreparseError> {
+    while index < v.len() {
+        match v[index] {
+            b'\t' | b' '..127 => index += 1,
+            128.. => index = handle_non_ascii(v, Segment::PropertyValue, index)?,
+            _ => rfc_err!(Segment::PropertyValue, Problem::ControlCharacter, index),
+        }
+    }
+    Ok(index)
+}
+
 // Modeled after `run_utf8_validation` in
 // lib/rustlib/src/rust/library/core/src/str/validations.rs
 // Panics if `index >= v.len()`
-#[allow(non_contiguous_range_endpoints)]
-fn handle_non_ascii(v: &[u8], state: State, mut index: usize) -> Result<usize, PreparseError> {
+#[allow(clippy::cast_possible_wrap, clippy::unnested_or_patterns)]
+fn handle_non_ascii(v: &[u8], segment: Segment, mut index: usize) -> Result<usize, PreparseError> {
     let len = v.len();
     while index < len {
         let old_offset = index;
         macro_rules! utf8_err {
             ($error_len: expr) => {
                 return Err(PreparseError {
-                    segment: segment_of(state),
+                    segment,
                     problem: Problem::Utf8Error($error_len),
                     valid_up_to: old_offset,
                 })
@@ -292,10 +221,7 @@ fn handle_non_ascii(v: &[u8], state: State, mut index: usize) -> Result<usize, P
 
         let this_byte = v[index];
         match this_byte {
-            b'\t' | b' '..b'"' | b'#'..b',' | b'-'..b':' | b'<'..127 => {
-                index += 1;
-                continue;
-            }
+            b'\t' | b' '..b'"' | b'#'..b',' | b'-'..b':' | b'<'..127 => index += 1,
 
             128.. => {
                 let w = utf8_char_width(this_byte);

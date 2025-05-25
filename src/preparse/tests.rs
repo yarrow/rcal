@@ -3,8 +3,7 @@ use super::*;
 use crate::error::{Problem, Segment};
 use Problem::*;
 use Segment::*;
-use bstr::BString;
-use bstr::ByteSlice;
+use bstr::{BString, ByteSlice};
 use pretty_assertions::assert_eq;
 
 fn equivalent_from_bytes(text: &[u8]) -> Result<Prop, PreparseError> {
@@ -61,6 +60,16 @@ fn forbid_embedded_dquotes() {
 #[test]
 fn forbid_space_after_ending_dquote() {
     err_is(r#"A;B="c" ,"d":val"#, (ParamValue, Unterminated));
+}
+#[test]
+fn forbid_dquote_after_ending_dquote() {
+    err_is(r#"A;B="c"","d":val"#, (ParamValue, DoubleQuote));
+}
+#[test]
+fn forbid_control_character_after_ending_dquote() {
+    let mut text = BString::from(r#"A;B="c" ,"d":val"#);
+    text[7] = 3;
+    assert_eq!(err_from_bytes(&text), (ParamValue, ControlCharacter));
 }
 #[test]
 fn property_name_required() {

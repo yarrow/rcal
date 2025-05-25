@@ -24,7 +24,7 @@ pub struct Prop<'a> {
     pub(crate) value: LocStr<'a>,
 }
 
-// Content lines must be valid UTF8 and contain no ASCII control characters. When the intial
+// Content lines must be valid UTF8 and contain no ASCII control characters. When the initial
 // problem found is something like "Property name isn't followed by a colon or semicolon" —
 // because the property name was followed by a control character or invalid UTF8 — then the
 // diagnose_character_errors function will record the presence of a control character or invalid
