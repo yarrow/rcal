@@ -25,7 +25,6 @@ unsafe fn loc_str(v: &[u8], start: usize, index: usize) -> LocStr<'_> {
     debug_assert!(str::from_utf8(&v[start..index]).is_ok());
     LocStr { loc: start, val: unsafe { str::from_utf8_unchecked(v.get_unchecked(start..index)) } }
 }
-#[allow(clippy::too_many_lines)]
 pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
     if v.is_empty() {
         return Err(EMPTY_CONTENT_LINE);
@@ -62,9 +61,8 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
         }};
     }
 
-    let mut segment = Segment::PropertyName;
     let len = v.len();
-    if index == 0 || index >= len {
+    if index == 0 || index >= len || !matches!(v[index], b';' | b':') {
         check_for_character_error!(Segment::PropertyName, Unterminated)
     }
 
@@ -73,20 +71,17 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
     let mut parameters = Vec::<Param<'a>>::new();
     let property_name = unsafe { loc_str(v, start, index) };
 
-    let mut pending_quote = false;
     'outer: while index < len && v[index] == b';' {
         finish_parameter(&mut parameters, &mut param_name, &mut param_values);
-        segment = Segment::ParamName;
         (start, index) = (index + 1, rfc5545_name(v, index + 1));
         if index >= len {
-            break 'outer;
+            check_for_character_error!(Segment::ParamName, Unterminated);
         }
         match v[index] {
             b'=' => {
                 if index == start {
                     rfc_err!(Segment::ParamName, Empty, index)
                 }
-                segment = Segment::ParamValue;
                 param_name = unsafe { loc_str(v, start, index) };
                 (start, index) = (index + 1, index + 1);
             }
@@ -94,21 +89,19 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
         }
         while index < len {
             if v[index] == b'"' {
-                pending_quote = true;
                 (start, index) = (index + 1, param_quoted(v, index + 1)?);
                 if index >= len {
-                    break 'outer;
+                    rfc_err!(Segment::ParamValue, UnclosedQuote, index)
                 }
                 match v[index] {
                     b'"' => {
-                        pending_quote = false;
                         param_values.push(unsafe { loc_str(v, start, index) });
                         index += 1;
                     }
                     _ => rfc_err!(Segment::ParamValue, ControlCharacter, index),
                 }
             } else {
-                index = param_text(v, start)?;
+                (start, index) = (start, param_text(v, start)?);
                 param_values.push(unsafe { loc_str(v, start, index) });
             }
             if index >= len {
@@ -125,25 +118,10 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
     }
     if index < len && v[index] == b':' {
         finish_parameter(&mut parameters, &mut param_name, &mut param_values);
-        segment = Segment::PropertyValue;
-        start = index + 1;
-        index = property_value(v, start)?;
-    }
-    debug_assert!(segment != Segment::PropertyValue || index == v.len());
-
-    match segment {
-        Segment::PropertyValue => {
-            Ok(Prop { name: property_name, parameters, value: unsafe { loc_str(v, start, index) } })
-        }
-        Segment::PropertyName => check_for_character_error!(Segment::PropertyName, Unterminated),
-        Segment::ParamName => check_for_character_error!(Segment::ParamName, Unterminated),
-        Segment::ParamValue => {
-            if pending_quote {
-                rfc_err!(Segment::ParamValue, UnclosedQuote, index)
-            } else {
-                rfc_err!(Segment::PropertyValue, Empty, index);
-            }
-        }
+        (start, index) = (index + 1, property_value(v, index + 1)?);
+        Ok(Prop { name: property_name, parameters, value: unsafe { loc_str(v, start, index) } })
+    } else {
+        rfc_err!(Segment::PropertyValue, Empty, index);
     }
 }
 
