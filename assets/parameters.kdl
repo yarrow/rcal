@@ -10,7 +10,7 @@ parameters {
     - RFC=7986 Section="6.2" method=email variant=Text
     - RFC=5545 Section="3.2.7" method=encoding variant=Encoding doc="""
         RFC 5545 gives values of `8BIT` or `BASE64` but the effect of an `8BIT` value
-        is the same as having no `ENCODING` parameterso we use the single-valued
+        is the same as having no `ENCODING` parameter so we use the single-valued
         `Base64` type.
         """
     - RFC=5545 Section="3.2.9" method=fbtype variant=FBType
@@ -43,27 +43,27 @@ parameters {
     - RFC=5545 Section="3.2.20" method=value variant=Value
 }
 types {
-    - variant=Boolean type=bool copy=#true
+    - variant=Boolean type=bool kind=copy
     - variant=CUType type=CUType 
     - variant=Display type=Display 
-    - variant=Duration type=SignedDuration copy=#true
-    - variant=Encoding type=Option<Base64> copy=#true
+    - variant=Duration type=SignedDuration kind=copy
+    - variant=Encoding type=Base64 kind=single_valued
     - variant=FBType type=FBType 
     - variant=Feature type=Feature 
     - variant=FmtType type=FmtType 
     - variant=Language type=Language 
-    - variant=Order type=NonZeroUsize copy=#true
+    - variant=Order type=NonZeroUsize kind=copy
     - variant=ParamText type=ParamText 
     - variant=PartStat type=PartStat 
-    - variant=Range type=Option<ThisAndFuture> copy=#true
+    - variant=Range type=ThisAndFuture kind=single_valued
     - variant=RelType type=RelType 
-    - variant=Related type=Related copy=#true
+    - variant=Related type=Related kind=copy
     - variant=Role type=Role 
     - variant=ScheduleAgent type=ScheduleAgent 
     - variant=ScheduleForceSend type=ScheduleForceSend 
     - variant=ScheduleStatus type=ScheduleStatus 
     - variant=SentBy type=CalAddress 
-    - variant=Size type=u64 copy=#true
+    - variant=Size type=u64 kind=copy
     - variant=Text type=String 
     - variant=Tzid type=String 
     - variant=Uri type=UriString 

@@ -15,7 +15,7 @@ pub enum ParameterValue {
     CUType(CUType),
     Display(Display),
     Duration(SignedDuration),
-    Encoding(Option<Base64>),
+    Encoding(Base64),
     FBType(FBType),
     Feature(Feature),
     FmtType(FmtType),
@@ -23,7 +23,7 @@ pub enum ParameterValue {
     Order(NonZeroUsize),
     ParamText(ParamText),
     PartStat(PartStat),
-    Range(Option<ThisAndFuture>),
+    Range(ThisAndFuture),
     RelType(RelType),
     Related(Related),
     Role(Role),
@@ -251,10 +251,10 @@ impl Parameters {
 
     /// Get the `ENCODING` parameter ([RFC 5545, § 3.2.7](https://datatracker.ietf.org/doc/html/rfc5545#section-3.2.7)).
     /// RFC 5545 gives values of `8BIT` or `BASE64` but the effect of an `8BIT` value
-    /// is the same as having no `ENCODING` parameterso we use the single-valued
+    /// is the same as having no `ENCODING` parameter so we use the single-valued
     /// `Base64` type.
     #[must_use]
-    pub fn encoding(&self) -> Option<Option<Base64>> {
+    pub fn encoding(&self) -> Option<Base64> {
         match self.0.get(&ENCODING) {
             None => None,
             Some(ParameterValue::Encoding(value)) => Some(*value),
@@ -264,7 +264,10 @@ impl Parameters {
 
     /// Set the `ENCODING` parameter ([RFC 5545, § 3.2.7](https://datatracker.ietf.org/doc/html/rfc5545#section-3.2.7)).
     pub fn set_encoding(&mut self, value: Option<Base64>) {
-        self.0.insert(ENCODING, ParameterValue::Encoding(value));
+        match value {
+            None => self.0.remove(&ENCODING),
+            Some(v) => self.0.insert(ENCODING, ParameterValue::Encoding(v)),
+        };
     }
 
     /// Get the `FBTYPE` parameter ([RFC 5545, § 3.2.9](https://datatracker.ietf.org/doc/html/rfc5545#section-3.2.9)).
@@ -451,7 +454,7 @@ impl Parameters {
     /// RFC 5545 says the only valid value for `RANGE` is `THISANDFUTURE`,
     /// so we have another single-valued type
     #[must_use]
-    pub fn range(&self) -> Option<Option<ThisAndFuture>> {
+    pub fn range(&self) -> Option<ThisAndFuture> {
         match self.0.get(&RANGE) {
             None => None,
             Some(ParameterValue::Range(value)) => Some(*value),
@@ -461,7 +464,10 @@ impl Parameters {
 
     /// Set the `RANGE` parameter ([RFC 5545, § 3.2.13](https://datatracker.ietf.org/doc/html/rfc5545#section-3.2.13)).
     pub fn set_range(&mut self, value: Option<ThisAndFuture>) {
-        self.0.insert(RANGE, ParameterValue::Range(value));
+        match value {
+            None => self.0.remove(&RANGE),
+            Some(v) => self.0.insert(RANGE, ParameterValue::Range(v)),
+        };
     }
 
     /// Get the `RELATED` parameter ([RFC 5545, § 3.2.14](https://datatracker.ietf.org/doc/html/rfc5545#section-3.2.14)).

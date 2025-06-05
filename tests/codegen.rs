@@ -69,7 +69,7 @@ impl GetStr for KdlNode {
 struct TypeInfo {
     variants: Vec<String>,
     type_of: LiteMap<String, String>,
-    is_copy: LiteMap<String, ()>,
+    kind: LiteMap<String, String>,
 }
 impl TypeInfo {
     fn write_param_values<W: std::io::Write>(&self, mut out: W) -> Result<()> {
@@ -79,7 +79,10 @@ impl TypeInfo {
         Ok(())
     }
     fn is_copy(&self, variant: &str) -> bool {
-        self.is_copy.get(variant).is_some()
+        self.kind.get(variant).is_some()
+    }
+    fn is_single_valued(&self, variant: &str) -> bool {
+        self.kind.get(variant).map(|s| s == "single_valued") == Some(true)
     }
     fn type_of(&self, variant: &str) -> Result<String> {
         Ok(self
@@ -92,18 +95,23 @@ impl TypeInfo {
 fn type_info(kdl: &KdlDocument) -> Result<TypeInfo> {
     let mut variants = Vec::new();
     let mut type_of = LiteMap::new();
-    let mut is_copy = LiteMap::new();
+    let mut kind = LiteMap::new();
     let nodes = dash_nodes(kdl, "types")?;
     for node in nodes {
         let v = node.get_str("variant")?;
         variants.push(v.clone());
         let t = node.get_str("type")?;
         type_of.insert(v.clone(), t);
-        if node.get("copy").is_some() {
-            is_copy.insert(v, ());
+        if let Some(s) = node.get("kind") {
+            match s.as_string() {
+                Some(s) if s == "copy" || s == "single_valued" => {
+                    kind.insert(v, s.to_string());
+                }
+                _ => panic!("kind must be either 'copy' or 'string'"),
+            }
         }
     }
-    Ok(TypeInfo { variants, type_of, is_copy })
+    Ok(TypeInfo { variants, type_of, kind })
 }
 #[derive(Debug)]
 struct ParamInfo {
@@ -144,7 +152,6 @@ impl ParamInfo {
         let variant = self.variant.clone();
         let typ = type_info.type_of(&variant)?;
         let (amphersand, star) = if type_info.is_copy(&variant) { ("", "*") } else { ("&", "") };
-        //let amphersand = if type_info.is_copy(&variant) { "&" } else { "&" };
 
         writeln!(out, "/// Get the `{konst}` parameter ({link}).")?;
         if let Some(doc) = &self.doc {
@@ -165,13 +172,24 @@ impl ParamInfo {
             "#
         )?;
         writeln!(out, "/// Set the `{konst}` parameter ({link}).")?;
-        writeln!(
-            out,
-            "pub fn set_{method}(&mut self, value: {typ}) {{
+        if type_info.is_single_valued(&variant) {
+            writeln!(
+                out,
+                "pub fn set_{method}(&mut self, value: Option<{typ}>) {{
+                    match value {{
+                        None => self.0.remove(&{konst}),
+                        Some(v) => self.0.insert({konst}, ParameterValue::{variant}(v)),
+                    }};
+                }}"
+            )?;
+        } else {
+            writeln!(
+                out,
+                "pub fn set_{method}(&mut self, value: {typ}) {{ 
                 self.0.insert({konst}, ParameterValue::{variant}(value));
-            }}
-            "
-        )?;
+                }}"
+            )?;
+        }
         writeln!(out)?;
         Ok(())
     }
