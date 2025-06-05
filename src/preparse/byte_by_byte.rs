@@ -87,33 +87,15 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
             }
             _ => check_for_character_error!(Segment::ParamName, Unterminated),
         }
-        while index < len {
-            if v[index] == b'"' {
-                (start, index) = (index + 1, param_quoted(v, index + 1)?);
-                if index >= len {
-                    rfc_err!(Segment::ParamValue, UnclosedQuote, index)
-                }
-                match v[index] {
-                    b'"' => {
-                        param_values.push(unsafe { loc_str(v, start, index) });
-                        index += 1;
-                    }
-                    _ => rfc_err!(Segment::ParamValue, ControlCharacter, index),
-                }
-            } else {
-                (start, index) = (start, param_text(v, start)?);
-                param_values.push(unsafe { loc_str(v, start, index) });
-            }
-            if index >= len {
-                break 'outer;
-            }
-            match v[index] {
-                b',' => (index, start) = (index + 1, index + 1),
-                b':' => break 'outer,
-                b';' => break,
-                b'"' => rfc_err!(Segment::ParamValue, DoubleQuote, index),
-                _ => check_for_character_error!(Segment::ParamValue, Unterminated),
-            }
+        index = list(v, index, &mut param_values)?;
+        if index >= len {
+            break;
+        }
+        match v[index] {
+            b':' => break 'outer,
+            b';' => continue,
+            b'"' => rfc_err!(Segment::ParamValue, DoubleQuote, index),
+            _ => check_for_character_error!(Segment::ParamValue, Unterminated),
         }
     }
     if index < len && v[index] == b':' {
@@ -125,6 +107,39 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
     }
 }
 
+pub fn list<'a>(
+    v: &'a [u8],
+    mut index: usize,
+    param_values: &mut Vec<LocStr<'a>>,
+) -> Result<usize, PreparseError> {
+    use Problem::*;
+    let len = v.len();
+    let mut start = index;
+    while index < len {
+        if v[index] == b'"' {
+            (start, index) = (index + 1, param_quoted(v, index + 1)?);
+            if index >= len {
+                rfc_err!(Segment::ParamValue, UnclosedQuote, index)
+            }
+            match v[index] {
+                b'"' => {
+                    param_values.push(unsafe { loc_str(v, start, index) });
+                    index += 1;
+                }
+                _ => rfc_err!(Segment::ParamValue, ControlCharacter, index),
+            }
+        } else {
+            (start, index) = (start, param_text(v, start)?);
+            param_values.push(unsafe { loc_str(v, start, index) });
+        }
+        if index >= len || v[index] != b',' {
+            return Ok(index);
+        } else {
+            (index, start) = (index + 1, index + 1);
+        }
+    }
+    Ok(index)
+}
 // SAFETY: `v[j..rfc5545_name(v, j)]`` is a valid UTF8 string because every byte in that range is
 // an ASCII character
 fn rfc5545_name(v: &[u8], mut index: usize) -> usize {
