@@ -3,6 +3,15 @@
 use super::{LocStr, Param, Prop, diagnose_character_errors};
 use crate::error::{EMPTY_CONTENT_LINE, PreparseError, Problem, Segment};
 use std::{mem, str};
+pub fn preparse(v: &[u8]) -> Result<Prop, PreparseError> {
+    if v.is_empty() {
+        return Err(EMPTY_CONTENT_LINE);
+    }
+    match inner_preparse(v) {
+        Ok(value) => Ok(value),
+        Err(err) => diagnose_character_errors(err, v),
+    }
+}
 // Return an error: the input doesn't correspond to the basic grammar in RFC 5545 § 3.1
 macro_rules! rfc_err {
     ($segment: expr, $problem: expr, $index: ident) => {
@@ -25,7 +34,7 @@ unsafe fn loc_str(v: &[u8], start: usize, index: usize) -> LocStr<'_> {
     debug_assert!(str::from_utf8(&v[start..index]).is_ok());
     LocStr { loc: start, val: unsafe { str::from_utf8_unchecked(v.get_unchecked(start..index)) } }
 }
-pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
+pub fn inner_preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
     if v.is_empty() {
         return Err(EMPTY_CONTENT_LINE);
     }

@@ -16,12 +16,12 @@ pub fn regex_preparse(v: &[u8]) -> Result<Prop, PreparseError> {
     if v.is_empty() {
         return Err(EMPTY_CONTENT_LINE);
     }
-    match pre_preparse(v) {
+    match inner_regex_preparse(v) {
         Ok(value) => Ok(value),
         Err(err) => super::diagnose_character_errors(err, v),
     }
 }
-fn pre_preparse(mut v: &[u8]) -> Result<Prop, PreparseError> {
+fn inner_regex_preparse(mut v: &[u8]) -> Result<Prop, PreparseError> {
     use Problem::*;
     use Segment::*;
 
