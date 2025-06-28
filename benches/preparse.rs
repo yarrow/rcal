@@ -15,7 +15,7 @@ fn regex_preparse_and_discard(lines: &[BString]) -> Vec<u8> {
 }
 pub fn compare_preparsers(c: &mut Criterion) {
     let mut group = c.benchmark_group("Preparsers");
-    group.sample_size(1000);
+    group.sample_size(500);
     group.measurement_time(std::time::Duration::new(10, 0));
     let path = "/Users/yarrow/rust/rcal/notes/studio/ics/Yarrow_yarrow.angelweed@gmail.com.ics";
     let input = std::fs::read_to_string(path).unwrap();

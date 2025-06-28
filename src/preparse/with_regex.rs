@@ -2,7 +2,7 @@ use crate::error::{EMPTY_CONTENT_LINE, PreparseError, Problem, Segment};
 use regex::bytes::Regex;
 use std::{mem, str, sync::LazyLock};
 
-use super::{LocStr, Param, Prop};
+use super::{LocStr, Param, Prop, invalid_character_or};
 
 static NAME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"\A[a-zA-Z0-9-]+"#).unwrap());
 static VALUE: LazyLock<Regex> =
@@ -16,12 +16,12 @@ pub fn regex_preparse(v: &[u8]) -> Result<Prop, PreparseError> {
     if v.is_empty() {
         return Err(EMPTY_CONTENT_LINE);
     }
-    match pre_preparse(v) {
+    match inner_regex_preparse(v) {
         Ok(value) => Ok(value),
-        Err(err) => super::diagnose_character_errors(err, v),
+        Err(err) => Err(invalid_character_or(err, v)),
     }
 }
-fn pre_preparse(mut v: &[u8]) -> Result<Prop, PreparseError> {
+fn inner_regex_preparse(mut v: &[u8]) -> Result<Prop, PreparseError> {
     use Problem::*;
     use Segment::*;
 
@@ -39,8 +39,8 @@ fn pre_preparse(mut v: &[u8]) -> Result<Prop, PreparseError> {
         };
     }
     macro_rules! err {
-        ($seg: expr, $prob: expr, $valid: expr) => {
-            return Err(PreparseError { segment: $seg, problem: $prob, valid_up_to: $valid })
+        ($prob: expr, $valid: expr) => {
+            return Err(PreparseError { problem: $prob, valid_up_to: $valid })
         };
     }
     macro_rules! advance_by {
@@ -69,20 +69,20 @@ fn pre_preparse(mut v: &[u8]) -> Result<Prop, PreparseError> {
     }
 
     let Some(m) = NAME.find(v) else {
-        err!(PropertyName, Empty, start);
+        err!(Empty(PropertyName), start);
     };
     let property_name = loc_str!(m);
     advance_past!(m);
     if v.is_empty() || !matches!(v[0], b';' | b':') {
-        err!(PropertyName, Unterminated, start);
+        err!(Unterminated(PropertyName), start);
     }
 
     let mut segment = PropertyValue;
     while consume!(b';') {
-        let Some(m) = NAME.find(v) else { err!(ParamName, Empty, start) };
+        let Some(m) = NAME.find(v) else { err!(Empty(ParamName), start) };
         param_name = loc_str!(m);
         advance_past!(m);
-        consume!(b'=' else err!(ParamName, Unterminated, start));
+        consume!(b'=' else err!(Unterminated(ParamName), start));
 
         segment = ParamValue;
         loop {
@@ -94,7 +94,7 @@ fn pre_preparse(mut v: &[u8]) -> Result<Prop, PreparseError> {
                     param_values.push(LocStr { loc, val });
                     advance_by!(quote + 1);
                 } else {
-                    err!(ParamValue, UnclosedQuote, start + quote)
+                    err!(UnclosedQuote(ParamValue), start + quote)
                 }
             } else {
                 let m = TEXT.find(v).unwrap(); // SAFETY: TEXT matches the empty string
@@ -112,12 +112,12 @@ fn pre_preparse(mut v: &[u8]) -> Result<Prop, PreparseError> {
         if m.end() == v.len() {
             return Ok(Prop { name: property_name, value: loc_str!(m), parameters });
         } else {
-            err!(PropertyValue, Unterminated, start + m.end());
+            err!(Unterminated(PropertyValue), start + m.end());
         }
     } else if segment == ParamValue && !v.is_empty() {
-        let problem = if v[0] == b'"' { DoubleQuote } else { Unterminated };
-        err!(segment, problem, start);
+        let problem = if v[0] == b'"' { DoubleQuote(ParamValue) } else { Unterminated(ParamValue) };
+        err!(problem, start);
     } else {
-        err!(PropertyValue, Empty, start);
+        err!(Empty(PropertyValue), start);
     }
 }

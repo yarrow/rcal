@@ -18,72 +18,72 @@ fn equivalent(text: &str) -> Result<Prop, PreparseError> {
     assert_eq!(pre, reg, "pre!=reg, text: {text}");
     pre
 }
-fn err_for(text: &str) -> (Segment, Problem) {
+fn err_for(text: &str) -> Problem {
     let err = equivalent(text).unwrap_err();
-    (err.segment, err.problem)
+    err.problem
 }
-fn err_from_bytes(text: &[u8]) -> (Segment, Problem) {
+fn err_from_bytes(text: &[u8]) -> Problem {
     let err = equivalent_from_bytes(text).unwrap_err();
-    (err.segment, err.problem)
+    err.problem
 }
 
 fn parse(text: &str) -> StrProp<'_> {
     delocate(&equivalent(text).unwrap())
 }
 
-fn err_is(text: &str, expected: (Segment, Problem)) {
+fn err_is(text: &str, expected: Problem) {
     assert_eq!(err_for(text), expected, "text: |{text}|");
 }
 #[test]
 fn property_name_only() {
-    err_is("A", (PropertyName, Unterminated));
+    err_is("A", Unterminated(PropertyName));
 }
 #[test]
 fn property_name_semicolon_only() {
-    err_is("A;", (ParamName, Empty));
+    err_is("A;", Empty(ParamName));
 }
 #[test]
 fn no_property_value() {
-    err_is("A;B=", (PropertyValue, Empty));
-    err_is("A;B=c", (PropertyValue, Empty));
+    err_is("A;B=", Empty(PropertyValue));
+    err_is("A;B=c", Empty(PropertyValue));
 }
 #[test]
 fn quotes_allow_punctuation_in_values() {
-    err_is(r#"A;B=",C=:""#, (PropertyValue, Empty));
-    err_is(r#"A;B=":C=:""#, (PropertyValue, Empty));
-    err_is(r#"A;B=";C=:""#, (PropertyValue, Empty));
+    err_is(r#"A;B=",C=:""#, Empty(PropertyValue));
+    err_is(r#"A;B=":C=:""#, Empty(PropertyValue));
+    err_is(r#"A;B=";C=:""#, Empty(PropertyValue));
 }
 #[test]
 fn forbid_embedded_dquotes() {
-    err_is(r#"A;B=ab"c":val"#, (ParamValue, DoubleQuote));
+    err_is(r#"A;B=ab"c":val"#, DoubleQuote(ParamValue));
 }
 #[test]
 fn forbid_space_after_ending_dquote() {
-    err_is(r#"A;B="c" ,"d":val"#, (ParamValue, Unterminated));
+    err_is(r#"A;B="c" ,"d":val"#, Unterminated(ParamValue));
 }
 #[test]
 fn forbid_dquote_after_ending_dquote() {
-    err_is(r#"A;B="c"","d":val"#, (ParamValue, DoubleQuote));
+    err_is(r#"A;B="c"","d":val"#, DoubleQuote(ParamValue));
 }
 #[test]
 fn forbid_control_character_after_ending_dquote() {
     let mut text = BString::from(r#"A;B="c" ,"d":val"#);
     text[7] = 3;
-    assert_eq!(err_from_bytes(&text), (ParamValue, ControlCharacter));
+    assert_eq!(err_from_bytes(&text), ControlCharacter);
 }
 #[test]
 fn property_name_required() {
-    err_is(":foo", (PropertyName, Empty));
-    err_is("/foo", (PropertyName, Empty));
+    err_is(":foo", Empty(PropertyName));
+    err_is("/foo", Empty(PropertyName));
 }
 #[test]
 fn forbid_empty_content_line() {
-    err_is("", (PropertyName, EmptyContentLine));
+    err_is("", EmptyContentLine);
 }
 #[test]
 fn parameter_name_required() {
-    err_is("Foo;=bar:", (ParamName, Empty));
-    err_is("Foo;/:", (ParamName, Empty));
+    err_is("Foo;=bar:", Empty(ParamName));
+    err_is("Foo;/:", Empty(ParamName));
 }
 #[test]
 fn must_be_utf8_len_2() {
@@ -91,24 +91,14 @@ fn must_be_utf8_len_2() {
     //let mut bad = BString::from("abc𒀁");
     let len = bad.len();
     bad[len - 1] = b'a';
-    assert_eq!(
-        err_from_bytes(bad.as_slice()),
-        (PropertyValue, Utf8Error(Some(1))),
-        "text: {:?}",
-        bad
-    );
+    assert_eq!(err_from_bytes(bad.as_slice()), Utf8Error(Some(1)), "text: {:?}", bad);
 }
 #[test]
 fn must_be_utf8_len_4() {
     let mut bad = BString::from("abc𒀁");
     let len = bad.len();
     bad[len - 2] = b'a';
-    assert_eq!(
-        err_from_bytes(bad.as_slice()),
-        (PropertyName, Utf8Error(Some(2))),
-        "text: {:?}",
-        bad
-    );
+    assert_eq!(err_from_bytes(bad.as_slice()), Utf8Error(Some(2)), "text: {:?}", bad);
 }
 
 #[test]
@@ -117,7 +107,7 @@ fn fuzz_says_this_is_slow_but_i_dont_know_why() {
               \xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\
               \xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\
               \xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff;A=;4=;A=;A=;B=;A6;";
-    assert_eq!(err_from_bytes(bad.as_slice()), (PropertyName, Utf8Error(Some(1))));
+    assert_eq!(err_from_bytes(bad.as_slice()), Utf8Error(Some(1)));
 }
 
 // Tests for the result returned

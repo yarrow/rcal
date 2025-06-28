@@ -24,82 +24,92 @@ pub enum Segment {
     ParamName,
     ParamValue,
 }
+impl fmt::Display for Segment {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use Segment::*;
+        let display = match self {
+            PropertyName => "property name",
+            PropertyValue => "property value",
+            ParamName => "parameter name",
+            ParamValue => "parameter value",
+        };
+        write!(f, "{display}",)
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Problem {
-    ControlCharacter,
     Utf8Error(Option<u8>),
-    DoubleQuote,
-    UnclosedQuote,
+    ControlCharacter,
     EmptyContentLine,
-    Empty,
-    Unterminated,
+    DoubleQuote(Segment),
+    UnclosedQuote(Segment),
+    Empty(Segment),
+    Unterminated(Segment),
 }
 #[derive(Clone, Debug, Error, PartialEq)]
 pub struct PreparseError {
-    pub(crate) segment: Segment,
     pub(crate) problem: Problem,
     pub(crate) valid_up_to: usize,
 }
-pub(crate) const EMPTY_CONTENT_LINE: PreparseError = PreparseError {
-    segment: Segment::PropertyName,
-    problem: Problem::EmptyContentLine,
-    valid_up_to: 0,
-};
+pub(crate) const EMPTY_CONTENT_LINE: PreparseError =
+    PreparseError { problem: Problem::EmptyContentLine, valid_up_to: 0 };
 
 impl fmt::Display for PreparseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use Problem::*;
         use Segment::*;
+        let valid_up_to = self.valid_up_to;
         match self.problem {
             ControlCharacter => {
-                write!(f, "invalid control character at index {}", self.valid_up_to)
+                write!(f, "invalid control character at index {valid_up_to}")
             }
             Utf8Error(error_len) => {
                 if let Some(error_len) = error_len {
                     write!(
                         f,
-                        "invalid utf-8 sequence of {} bytes from index {}",
-                        error_len, self.valid_up_to
+                        "invalid utf-8 sequence of {error_len} bytes from index {valid_up_to}"
                     )
                 } else {
-                    write!(f, "incomplete utf-8 byte sequence from index {}", self.valid_up_to)
+                    write!(f, "incomplete utf-8 byte sequence from index {valid_up_to}")
                 }
             }
-            DoubleQuote => write!(f, "unexpected double quote (\") at index {}", self.valid_up_to),
-            UnclosedQuote => write!(f, "expected double quote (\") at index {}", self.valid_up_to),
             EmptyContentLine => write!(f, "content line is empty"),
-            Empty => match self.segment {
-                ParamName => write!(f, "expected a parameter name after the semicolon (;)"),
-                PropertyName => write!(f, "content line doesn't start with a property name"),
+            DoubleQuote(segment) => {
+                write!(f, "unexpected double quote (\") in {segment} at index {valid_up_to}")
+            }
+            UnclosedQuote(segment) => {
+                write!(f, "expected double quote (\") in {segment} at index {valid_up_to}")
+            }
+            Empty(segment) => match segment {
+                ParamName => {
+                    write!(f, "expected a {segment} after the semicolon (;) at index {valid_up_to}")
+                }
+                PropertyName => write!(f, "content line doesn't start with a {segment}"),
                 PropertyValue => {
-                    write!(f, "content line does end with a property value — missing colon (:)?")
+                    write!(f, "content line doesn't end with a {segment} — missing colon (:)?")
                 }
                 ParamValue => write!(
                     f,
-                    "BUG: the error claims there's an empty parameter value, but parameter values \
-                    can be empty"
+                    "BUG: the error claims there's an empty {segment}, but {segment}s can be empty"
                 ),
             },
-            Unterminated => match self.segment {
+            Unterminated(segment) => match segment {
                 ParamName => write!(
                     f,
-                    "expecting an equals sign (=) at index {}, after the parameter name",
-                    self.valid_up_to
+                    "expecting an equals sign (=) at index {valid_up_to}, after the {segment}"
                 ),
                 PropertyName => write!(
                     f,
-                    "expecting a colon (:) or semicolon (;) at index {}, after the property name",
-                    self.valid_up_to
+                    "expecting a colon (:) or semicolon (;) at index {valid_up_to}, after the {segment}",
                 ),
                 ParamValue => write!(
                     f,
-                    "expecting a a comma (,) or colon (:) or semicolon(;) at index {}, after the \
-                    parameter value",
-                    self.valid_up_to
+                    "expecting a a comma (,) or colon (:) or semicolon(;) at index {valid_up_to}, \
+                    after the {segment}",
                 ),
                 PropertyValue => write!(
                     f,
-                    "BUG: the error claims the property value is ended by an unexpected character, \
+                    "BUG: the error claims the {segment} is ended by an unexpected character, \
                     but the only candidates (ASCII control characters and invalid utf8 sequences) \
                     have separate error messages"
                 ),
@@ -115,24 +125,27 @@ mod test {
         // Make use I ended each broken line with a line feed (and have no extra spaces)
         use Problem::*;
         use Segment::*;
-        let segments = [PropertyName, PropertyValue, ParamName, ParamValue];
         let problems = [
-            ControlCharacter,
             Utf8Error(None),
-            DoubleQuote,
-            UnclosedQuote,
+            ControlCharacter,
             EmptyContentLine,
-            Empty,
-            Unterminated,
+            DoubleQuote(ParamValue),
+            UnclosedQuote(ParamValue),
+            Empty(PropertyName),
+            Empty(PropertyValue),
+            Empty(ParamName),
+            Empty(ParamValue),
+            Unterminated(PropertyName),
+            Unterminated(PropertyValue),
+            Unterminated(ParamName),
+            Unterminated(ParamValue),
         ];
         for p in problems {
-            for s in segments {
-                let err = PreparseError { segment: s, problem: p, valid_up_to: 0 };
-                let message = err.to_string();
-                let bad = message.find('\n').or_else(|| message.find("  "));
-                if bad.is_some() {
-                    panic!("\n{err:?}\n{message}");
-                }
+            let err = PreparseError { problem: p, valid_up_to: 0 };
+            let message = err.to_string();
+            let bad = message.find('\n').or_else(|| message.find("  "));
+            if bad.is_some() {
+                panic!("\n{err:?}\n{message}");
             }
         }
     }

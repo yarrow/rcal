@@ -24,29 +24,24 @@ pub struct Prop<'a> {
     pub(crate) value: LocStr<'a>,
 }
 
-// Content lines must be valid UTF8 and contain no ASCII control characters. When the initial
-// problem found is something like "Property name isn't followed by a colon or semicolon" —
-// because the property name was followed by a control character or invalid UTF8 — then the
-// diagnose_character_errors function will record the presence of a control character or invalid
-// UTF8 in err.problem
-fn diagnose_character_errors(mut err: PreparseError, v: &[u8]) -> Result<Prop, PreparseError> {
-    let bad_place = err.valid_up_to;
-    let remaining = &v[bad_place..];
-    if remaining.is_empty() {
-        return Err(err);
-    }
-    let this_byte = remaining[0];
-    if this_byte.is_ascii_control() && this_byte != b'\t' {
-        err.problem = Problem::ControlCharacter;
-    } else if this_byte >= 128 {
-        #[allow(clippy::cast_possible_truncation)]
-        if let Err(utf8) = str::from_utf8(remaining) {
-            if utf8.valid_up_to() == 0 {
-                err.problem = Problem::Utf8Error(utf8.error_len().map(|len| len as u8));
-            }
+// Content lines must be valid UTF8 and contain no ASCII control characters except tabs.
+//
+//`invalid_character_or` ensures that invalid UTF8 is reported even if other errors occur
+// earlier in `v`, and if `v` is valid UTF8, ensures that invalid ASCII control characters are
+//reported even if parsing errors occur earlier.
+
+fn invalid_character_or(err: PreparseError, v: &[u8]) -> PreparseError {
+    #[allow(clippy::cast_possible_truncation)]
+    if let Err(utf8) = str::from_utf8(v) {
+        PreparseError {
+            problem: Problem::Utf8Error(utf8.error_len().map(|len| len as u8)),
+            valid_up_to: utf8.valid_up_to(),
         }
+    } else if let Some(bad_ctrl) = v.iter().position(|&b| b.is_ascii_control() && b != b'\t') {
+        PreparseError { problem: Problem::ControlCharacter, valid_up_to: bad_ctrl }
+    } else {
+        err
     }
-    Err(err)
 }
 
 #[cfg(test)]

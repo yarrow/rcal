@@ -1,12 +1,21 @@
 // RFC 5545 has multiple cases where a "good" ASCII character range has a one-character gap
 #![allow(non_contiguous_range_endpoints)]
-use super::{LocStr, Param, Prop, diagnose_character_errors};
+use super::{LocStr, Param, Prop, invalid_character_or};
 use crate::error::{EMPTY_CONTENT_LINE, PreparseError, Problem, Segment};
 use std::{mem, str};
+pub fn preparse(v: &[u8]) -> Result<Prop, PreparseError> {
+    if v.is_empty() {
+        return Err(EMPTY_CONTENT_LINE);
+    }
+    match inner_preparse(v) {
+        Ok(value) => Ok(value),
+        Err(err) => Err(invalid_character_or(err, v)),
+    }
+}
 // Return an error: the input doesn't correspond to the basic grammar in RFC 5545 § 3.1
 macro_rules! rfc_err {
-    ($segment: expr, $problem: expr, $index: ident) => {
-        return Err(PreparseError { segment: $segment, problem: $problem, valid_up_to: $index })
+    ($problem: expr, $index: ident) => {
+        return Err(PreparseError { problem: $problem, valid_up_to: $index })
     };
 }
 
@@ -25,11 +34,12 @@ unsafe fn loc_str(v: &[u8], start: usize, index: usize) -> LocStr<'_> {
     debug_assert!(str::from_utf8(&v[start..index]).is_ok());
     LocStr { loc: start, val: unsafe { str::from_utf8_unchecked(v.get_unchecked(start..index)) } }
 }
-pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
+pub fn inner_preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
     if v.is_empty() {
         return Err(EMPTY_CONTENT_LINE);
     }
     use Problem::*;
+    use Segment::*;
 
     // INVARIANT: `v[start..index]` is a valid UTF8 string. (Implies `start <= index && index <= v.len()`)
     // (The invariant implies that `loc_str(v, start, index)` is safe, and that is the only way we
@@ -51,19 +61,11 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
     // only as long as we don't call `unsafe { loc_str(start, index)` in the middle of scanning a
     // multi-byte UTF8 code point.)
 
-    macro_rules! check_for_character_error {
-        ($segment: expr, $problem: expr) => {{
-            let problem = if $problem == Unterminated && index == start { Empty } else { $problem };
-            return diagnose_character_errors(
-                PreparseError { segment: $segment, problem, valid_up_to: index },
-                v,
-            );
-        }};
-    }
-
     let len = v.len();
-    if index == 0 || index >= len || !matches!(v[index], b';' | b':') {
-        check_for_character_error!(Segment::PropertyName, Unterminated)
+    if index == 0 {
+        rfc_err!(Empty(PropertyName), index);
+    } else if index >= len || !matches!(v[index], b';' | b':') {
+        rfc_err!(Unterminated(PropertyName), index)
     }
 
     let mut param_name = LocStr::default();
@@ -74,18 +76,20 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
     'outer: while index < len && v[index] == b';' {
         finish_parameter(&mut parameters, &mut param_name, &mut param_values);
         (start, index) = (index + 1, rfc5545_name(v, index + 1));
+        if index == start {
+            rfc_err!(Empty(ParamName), index)
+        }
         if index >= len {
-            check_for_character_error!(Segment::ParamName, Unterminated);
+            rfc_err!(Unterminated(ParamName), index);
         }
         match v[index] {
             b'=' => {
-                if index == start {
-                    rfc_err!(Segment::ParamName, Empty, index)
-                }
                 param_name = unsafe { loc_str(v, start, index) };
-                (start, index) = (index + 1, index + 1);
+                index += 1;
             }
-            _ => check_for_character_error!(Segment::ParamName, Unterminated),
+            _ => {
+                rfc_err!(Unterminated(ParamName), index)
+            }
         }
         index = list(v, index, &mut param_values)?;
         if index >= len {
@@ -93,9 +97,9 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
         }
         match v[index] {
             b':' => break 'outer,
-            b';' => continue,
-            b'"' => rfc_err!(Segment::ParamValue, DoubleQuote, index),
-            _ => check_for_character_error!(Segment::ParamValue, Unterminated),
+            b';' => {}
+            b'"' => rfc_err!(DoubleQuote(ParamValue), index),
+            _ => rfc_err!(Unterminated(ParamValue), index),
         }
     }
     if index < len && v[index] == b':' {
@@ -103,7 +107,7 @@ pub fn preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
         (start, index) = (index + 1, property_value(v, index + 1)?);
         Ok(Prop { name: property_name, parameters, value: unsafe { loc_str(v, start, index) } })
     } else {
-        rfc_err!(Segment::PropertyValue, Empty, index);
+        rfc_err!(Empty(PropertyValue), index);
     }
 }
 
@@ -119,14 +123,14 @@ pub fn list<'a>(
         if v[index] == b'"' {
             (start, index) = (index + 1, param_quoted(v, index + 1)?);
             if index >= len {
-                rfc_err!(Segment::ParamValue, UnclosedQuote, index)
+                rfc_err!(UnclosedQuote(Segment::ParamValue), index)
             }
             match v[index] {
                 b'"' => {
                     param_values.push(unsafe { loc_str(v, start, index) });
                     index += 1;
                 }
-                _ => rfc_err!(Segment::ParamValue, ControlCharacter, index),
+                _ => rfc_err!(ControlCharacter, index),
             }
         } else {
             (start, index) = (start, param_text(v, start)?);
@@ -157,7 +161,7 @@ fn param_text(v: &[u8], mut index: usize) -> Result<usize, PreparseError> {
     while index < v.len() {
         match v[index] {
             b'\t' | b' '..b'"' | b'#'..b',' | b'-'..b':' | b'<'..127 => index += 1,
-            128.. => index = handle_non_ascii(v, Segment::ParamValue, index)?,
+            128.. => index = handle_non_ascii(v, index)?,
             _ => break,
         }
     }
@@ -167,7 +171,7 @@ fn param_quoted(v: &[u8], mut index: usize) -> Result<usize, PreparseError> {
     while index < v.len() {
         match v[index] {
             b'\t' | b' '..b'"' | b'#'..127 => index += 1,
-            128.. => index = handle_non_ascii(v, Segment::ParamValue, index)?,
+            128.. => index = handle_non_ascii(v, index)?,
             _ => break,
         }
     }
@@ -177,8 +181,8 @@ fn property_value(v: &[u8], mut index: usize) -> Result<usize, PreparseError> {
     while index < v.len() {
         match v[index] {
             b'\t' | b' '..127 => index += 1,
-            128.. => index = handle_non_ascii(v, Segment::PropertyValue, index)?,
-            _ => rfc_err!(Segment::PropertyValue, Problem::ControlCharacter, index),
+            128.. => index = handle_non_ascii(v, index)?,
+            _ => rfc_err!(Problem::ControlCharacter, index),
         }
     }
     Ok(index)
@@ -188,17 +192,13 @@ fn property_value(v: &[u8], mut index: usize) -> Result<usize, PreparseError> {
 // lib/rustlib/src/rust/library/core/src/str/validations.rs
 // Panics if `index >= v.len()`
 #[allow(clippy::cast_possible_wrap, clippy::unnested_or_patterns)]
-fn handle_non_ascii(v: &[u8], segment: Segment, mut index: usize) -> Result<usize, PreparseError> {
+fn handle_non_ascii(v: &[u8], mut index: usize) -> Result<usize, PreparseError> {
     let len = v.len();
     while index < len {
         let old_offset = index;
         macro_rules! utf8_err {
             ($error_len: expr) => {
-                return Err(PreparseError {
-                    segment,
-                    problem: Problem::Utf8Error($error_len),
-                    valid_up_to: old_offset,
-                })
+                rfc_err!(Problem::Utf8Error($error_len), old_offset)
             };
         }
         macro_rules! next {
