@@ -1,10 +1,14 @@
 //! Operations related to RFC 5545 validation.
 use crate::error::{PreparseError, Problem};
 use std::str;
+#[cfg(feature = "cautious")]
 mod with_regex;
-pub use with_regex::regex_preparse;
+#[cfg(feature = "cautious")]
+pub use with_regex::cautious_preparse;
+#[cfg(feature = "bold")]
 mod byte_by_byte;
-pub use byte_by_byte::preparse;
+#[cfg(feature = "bold")]
+pub use byte_by_byte::bold_preparse;
 
 /// A located `str`: a substring of a larger string, along with its location in that string.
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -30,15 +34,26 @@ pub struct Prop<'a> {
 // earlier in `v`, and if `v` is valid UTF8, ensures that invalid ASCII control characters are
 //reported even if parsing errors occur earlier.
 
-fn invalid_character_or(err: PreparseError, v: &[u8]) -> PreparseError {
-    #[allow(clippy::cast_possible_truncation)]
-    if let Err(utf8) = str::from_utf8(v) {
+trait ToPreparseError {
+    fn to_preparse_error(&self) -> PreparseError;
+}
+impl ToPreparseError for str::Utf8Error {
+    fn to_preparse_error(&self) -> PreparseError {
+        #[allow(clippy::cast_possible_truncation)]
         PreparseError {
-            problem: Problem::Utf8Error(utf8.error_len().map(|len| len as u8)),
-            valid_up_to: utf8.valid_up_to(),
+            problem: Problem::Utf8Error(self.error_len().map(|len| len as u8)),
+            valid_up_to: self.valid_up_to(),
         }
-    } else if let Some(bad_ctrl) = v.iter().position(|&b| b.is_ascii_control() && b != b'\t') {
-        PreparseError { problem: Problem::ControlCharacter, valid_up_to: bad_ctrl }
+    }
+}
+
+fn control_character_or(err: PreparseError, v: &[u8]) -> PreparseError {
+    if matches!(err.problem, Problem::Utf8Error(_)) || err.valid_up_to == v.len() {
+        return err;
+    }
+    let b = v[err.valid_up_to];
+    if b.is_ascii_control() && b != b'\t' {
+        PreparseError { problem: Problem::ControlCharacter, valid_up_to: err.valid_up_to }
     } else {
         err
     }

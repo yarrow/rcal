@@ -1,4 +1,4 @@
-use super::with_regex::regex_preparse;
+#![cfg(all(feature = "cautious", feature = "bold"))]
 use super::*;
 use crate::error::{Problem, Segment};
 use Problem::*;
@@ -7,16 +7,23 @@ use bstr::{BString, ByteSlice};
 use pretty_assertions::assert_eq;
 
 fn equivalent_from_bytes(text: &[u8]) -> Result<Prop, PreparseError> {
-    let pre = preparse(text);
-    let reg = regex_preparse(text);
-    assert_eq!(pre, reg, "pre!=reg, text: {:?}\n pre {:?}\nreg {:?}", text.as_bstr(), pre, reg);
-    pre
+    let bold = bold_preparse(text);
+    let cautious = cautious_preparse(text);
+    assert_eq!(
+        bold,
+        cautious,
+        "bold!=cautious, text: {:?}\n bold {:?}\ncautious {:?}",
+        text.as_bstr(),
+        bold,
+        cautious
+    );
+    bold
 }
 fn equivalent(text: &str) -> Result<Prop, PreparseError> {
-    let pre = preparse(text.as_bytes());
-    let reg = regex_preparse(text.as_bytes());
-    assert_eq!(pre, reg, "pre!=reg, text: {text}");
-    pre
+    let bold = bold_preparse(text.as_bytes());
+    let cautious = cautious_preparse(text.as_bytes());
+    assert_eq!(bold, cautious, "bold!=cautious, text: {text}");
+    bold
 }
 fn err_for(text: &str) -> Problem {
     let err = equivalent(text).unwrap_err();

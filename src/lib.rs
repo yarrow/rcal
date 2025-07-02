@@ -13,5 +13,8 @@ pub(crate) use error::{NameError, NameResult};
 pub mod names;
 pub mod parameter;
 pub mod preparse;
-pub use preparse::{preparse, regex_preparse};
+#[cfg(feature = "bold")]
+pub use preparse::bold_preparse;
+#[cfg(feature = "cautious")]
+pub use preparse::cautious_preparse;
 pub mod unfolded;

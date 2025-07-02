@@ -1,17 +1,33 @@
 #![allow(clippy::pedantic)]
 use bstr::BString;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use rcal::preparse::{Prop, preparse, regex_preparse};
+use rcal::preparse;
 use rcal::unfolded::BufReadContent;
 
-fn discard(stuff: &Prop) -> u8 {
+fn discard(stuff: &preparse::Prop) -> u8 {
     if stuff.name.loc == 0 { black_box(b'0') } else { black_box(b'1') }
 }
-fn preparse_and_discard(lines: &[BString]) -> Vec<u8> {
-    lines.iter().map(|line| discard(&preparse(line).unwrap())).collect()
+#[allow(unused_variables)]
+fn bold_preparse_and_discard(lines: &[BString]) -> Vec<u8> {
+    #[cfg(feature = "bold")]
+    {
+        lines.iter().map(|line| discard(&preparse::bold_preparse(line).unwrap())).collect()
+    }
+    #[cfg(not(feature = "bold"))]
+    {
+        unimplemented!("\n\nTry cargo bench --all-features\n")
+    }
 }
-fn regex_preparse_and_discard(lines: &[BString]) -> Vec<u8> {
-    lines.iter().map(|line| discard(&regex_preparse(line).unwrap())).collect()
+#[allow(unused_variables)]
+fn cautious_preparse_and_discard(lines: &[BString]) -> Vec<u8> {
+    #[cfg(feature = "cautious")]
+    {
+        lines.iter().map(|line| discard(&preparse::cautious_preparse(line).unwrap())).collect()
+    }
+    #[cfg(not(feature = "cautious"))]
+    {
+        unimplemented!("\n\nTry cargo bench --all-features\n")
+    }
 }
 pub fn compare_preparsers(c: &mut Criterion) {
     let mut group = c.benchmark_group("Preparsers");
@@ -25,10 +41,10 @@ pub fn compare_preparsers(c: &mut Criterion) {
         lines.push(line.1);
     }
     group.bench_with_input(BenchmarkId::new("Plain", "Events-Calendar"), &lines, |b, lines| {
-        b.iter(|| preparse_and_discard(black_box(lines)))
+        b.iter(|| bold_preparse_and_discard(black_box(lines)))
     });
     group.bench_with_input(BenchmarkId::new("Regex", "Events-Calendar"), &lines, |b, lines| {
-        b.iter(|| regex_preparse_and_discard(black_box(lines)))
+        b.iter(|| cautious_preparse_and_discard(black_box(lines)))
     });
 }
 

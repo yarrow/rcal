@@ -1,9 +1,8 @@
 use crate::error::{EMPTY_CONTENT_LINE, PreparseError, Problem, Segment};
-use regex::bytes::Regex;
+use regex::Regex;
 use std::{mem, str, sync::LazyLock};
 
-use super::{LocStr, Param, Prop, invalid_character_or};
-
+use super::{LocStr, Param, Prop, ToPreparseError, control_character_or};
 static NAME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"\A[a-zA-Z0-9-]+"#).unwrap());
 static VALUE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\A[^\x00-\x08\x0A-\x1F\x7F]*").unwrap());
@@ -12,19 +11,23 @@ static TEXT: LazyLock<Regex> =
 static QUOTED: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"\A"[^\x00-\x08\x0A-\x1F\x7F"]*"#).unwrap());
 
-pub fn regex_preparse(v: &[u8]) -> Result<Prop, PreparseError> {
+pub fn cautious_preparse(v: &[u8]) -> Result<Prop<'_>, PreparseError> {
     if v.is_empty() {
         return Err(EMPTY_CONTENT_LINE);
     }
-    match inner_regex_preparse(v) {
+    match inner_preparse(v) {
         Ok(value) => Ok(value),
-        Err(err) => Err(invalid_character_or(err, v)),
+        Err(err) => Err(control_character_or(err, v)),
     }
 }
-fn inner_regex_preparse(mut v: &[u8]) -> Result<Prop, PreparseError> {
+fn inner_preparse(v: &[u8]) -> Result<Prop<'_>, PreparseError> {
     use Problem::*;
     use Segment::*;
 
+    let mut v = match str::from_utf8(v) {
+        Ok(v) => v,
+        Err(utf8_err) => return Err(utf8_err.to_preparse_error()),
+    };
     let mut start = 0;
     let mut param_name;
     let mut param_values = Vec::<LocStr>::new();
@@ -32,10 +35,7 @@ fn inner_regex_preparse(mut v: &[u8]) -> Result<Prop, PreparseError> {
 
     macro_rules! loc_str {
         ($m: ident) => {
-            LocStr {
-                loc: start,
-                val: unsafe { str::from_utf8_unchecked(v.get_unchecked(..$m.end())) },
-            }
+            LocStr { loc: start, val: &v[..$m.end()] }
         };
     }
     macro_rules! err {
@@ -46,7 +46,7 @@ fn inner_regex_preparse(mut v: &[u8]) -> Result<Prop, PreparseError> {
     macro_rules! advance_by {
         ($n: expr) => {
             start += $n;
-            v = unsafe { v.get_unchecked($n..) }
+            v = &v[$n..];
         };
     }
     macro_rules! advance_past {
@@ -56,7 +56,7 @@ fn inner_regex_preparse(mut v: &[u8]) -> Result<Prop, PreparseError> {
     }
     macro_rules! consume {
         ($ch: literal) => {
-            !v.is_empty() && v[0] == $ch && {
+            !v.is_empty() && v.as_bytes()[0] == $ch && {
                 advance_by!(1);
                 true
             }
@@ -73,7 +73,7 @@ fn inner_regex_preparse(mut v: &[u8]) -> Result<Prop, PreparseError> {
     };
     let property_name = loc_str!(m);
     advance_past!(m);
-    if v.is_empty() || !matches!(v[0], b';' | b':') {
+    if v.is_empty() || !matches!(v.as_bytes()[0], b';' | b':') {
         err!(Unterminated(PropertyName), start);
     }
 
@@ -88,9 +88,9 @@ fn inner_regex_preparse(mut v: &[u8]) -> Result<Prop, PreparseError> {
         loop {
             if let Some(m) = QUOTED.find(v) {
                 let quote = m.end();
-                if quote < v.len() && v[quote] == b'"' {
+                if quote < v.len() && v.as_bytes()[quote] == b'"' {
                     let loc = start + 1;
-                    let val = unsafe { str::from_utf8_unchecked(v.get_unchecked(1..quote)) };
+                    let val = &v[1..quote];
                     param_values.push(LocStr { loc, val });
                     advance_by!(quote + 1);
                 } else {
@@ -115,7 +115,11 @@ fn inner_regex_preparse(mut v: &[u8]) -> Result<Prop, PreparseError> {
             err!(Unterminated(PropertyValue), start + m.end());
         }
     } else if segment == ParamValue && !v.is_empty() {
-        let problem = if v[0] == b'"' { DoubleQuote(ParamValue) } else { Unterminated(ParamValue) };
+        let problem = if v.as_bytes()[0] == b'"' {
+            DoubleQuote(ParamValue)
+        } else {
+            Unterminated(ParamValue)
+        };
         err!(problem, start);
     } else {
         err!(Empty(PropertyValue), start);

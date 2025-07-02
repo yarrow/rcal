@@ -13,6 +13,7 @@ libfuzzer-sys = "0.4"
 
 [dependencies.rcal]
 path = ".."
+features = ["cautious", "bold"]
 
 [[bin]]
 name = "preparse"

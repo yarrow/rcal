@@ -15,17 +15,21 @@ path = "src/lib.rs"
 
 [dependencies]
 bstr = { version = "1.11.3", default-features = false, features = ["std"] }
-heck = "0.5.0"
 indexmap = "2.9.0"
 jiff = "0.2.4"
 litemap = "0.7.5"
 memchr = "2.7.4"
 nonempty = "0.11.0"
 paste = "1.0.15"
-regex = "1.11.1"
+regex = { version = "1.11.1", optional = true }
 rustc-hash = "2.1.1"
 thiserror = "2.0.12"
 winnow = "0.7.4"
+
+[features]
+default = ["cautious"]
+cautious = ["dep:regex"]
+bold = []
 
 [lints.rust]
 warnings = "deny"
@@ -58,6 +62,7 @@ single_match_else = "allow"
 anyhow = "1.0.98"
 codegenrs = { version = "3.0.2", default-features = false }
 criterion = "0.5.1"
+heck = "0.5.0"
 kdl = "6.3.4"
 pretty_assertions = "1.4.1"
 snapbox = "0.6.21"

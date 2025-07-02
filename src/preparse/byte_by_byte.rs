@@ -1,15 +1,21 @@
 // RFC 5545 has multiple cases where a "good" ASCII character range has a one-character gap
 #![allow(non_contiguous_range_endpoints)]
-use super::{LocStr, Param, Prop, invalid_character_or};
+use super::{LocStr, Param, Prop, ToPreparseError, control_character_or};
 use crate::error::{EMPTY_CONTENT_LINE, PreparseError, Problem, Segment};
 use std::{mem, str};
-pub fn preparse(v: &[u8]) -> Result<Prop, PreparseError> {
+pub fn bold_preparse(v: &[u8]) -> Result<Prop<'_>, PreparseError> {
     if v.is_empty() {
         return Err(EMPTY_CONTENT_LINE);
     }
     match inner_preparse(v) {
         Ok(value) => Ok(value),
-        Err(err) => Err(invalid_character_or(err, v)),
+        Err(err) => {
+            if let Err(utf8_err) = str::from_utf8(v) {
+                Err(utf8_err.to_preparse_error())
+            } else {
+                Err(control_character_or(err, v))
+            }
+        }
     }
 }
 // Return an error: the input doesn't correspond to the basic grammar in RFC 5545 § 3.1
@@ -34,7 +40,7 @@ unsafe fn loc_str(v: &[u8], start: usize, index: usize) -> LocStr<'_> {
     debug_assert!(str::from_utf8(&v[start..index]).is_ok());
     LocStr { loc: start, val: unsafe { str::from_utf8_unchecked(v.get_unchecked(start..index)) } }
 }
-pub fn inner_preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
+pub fn inner_preparse(v: &[u8]) -> Result<Prop<'_>, PreparseError> {
     if v.is_empty() {
         return Err(EMPTY_CONTENT_LINE);
     }
@@ -70,7 +76,7 @@ pub fn inner_preparse<'a>(v: &'a [u8]) -> Result<Prop<'a>, PreparseError> {
 
     let mut param_name = LocStr::default();
     let mut param_values = Vec::<LocStr>::new();
-    let mut parameters = Vec::<Param<'a>>::new();
+    let mut parameters = Vec::<Param>::new();
     let property_name = unsafe { loc_str(v, start, index) };
 
     'outer: while index < len && v[index] == b';' {

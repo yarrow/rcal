@@ -1,5 +1,5 @@
 #!/bin/sh
 set -e
 cargo fmt -- --check
-cargo test -q
+cargo test -q --all-features
 typos
